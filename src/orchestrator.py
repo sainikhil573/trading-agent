@@ -247,6 +247,8 @@ def _print_morning_brief(brief: dict, today: str) -> None:
             if bd:
                 scores = "  ".join(f"{k[:4]}={v}" for k, v in bd.items())
                 print(f"  Scores         : {scores}")
+            print(f"  Entry trigger  : {t.get('entry_trigger','')}")
+            print(f"  Recovery risk  : {t.get('mid_session_recovery_risk','')}")
             print(f"  Reasoning      : {t.get('reasoning','')}")
             print(f"  Key Risk       : {t.get('key_risk','')}")
 
@@ -288,4 +290,201 @@ def _print_preopen_brief(preopen: dict, today: str) -> None:
 
     if preopen.get("preopen_summary"):
         print(f"\n  {preopen['preopen_summary']}")
+    print(f"\n{sep}\n")
+
+
+# ---------------------------------------------------------------------------
+# 3:30 PM IST — Post-market outcome tracker
+# ---------------------------------------------------------------------------
+
+# ATM delta approximation for index options
+_ATM_DELTA = 0.5
+
+# yfinance tickers for indices
+_INDEX_YF = {"NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK"}
+
+
+def run_postmarket_tracker() -> dict:
+    """
+    Fetch today's closing OHLC for each predicted instrument,
+    compare to morning trade brief, and append to prediction_accuracy.json.
+    No Claude API call — purely data-driven outcome tracking.
+    """
+    import yfinance as yf
+
+    today = date.today().strftime("%Y-%m-%d")
+    logger.info("=" * 70)
+    logger.info("POST-MARKET TRACKER  —  %s  (%s)", today, _ist_now_str())
+    logger.info("=" * 70)
+
+    morning_path = OUT_DIR / f"trade_brief_morning_{today}.json"
+    if not morning_path.exists():
+        logger.warning("No morning brief for %s — nothing to track", today)
+        return {}
+
+    with open(morning_path, encoding="utf-8") as f:
+        morning = json.load(f)
+
+    trades = morning.get("trades", [])
+    if not trades:
+        logger.info("No recommended trades in morning brief — skipping tracker")
+        return {}
+
+    results = []
+    for trade in trades:
+        sym            = trade.get("symbol", "")
+        signal         = trade.get("signal", "")           # CALL or PUT
+        strike         = trade.get("strike")
+        entry_premium  = trade.get("entry_price")
+        sl_premium     = trade.get("stop_loss")
+        t1_premium     = trade.get("target_1")
+        t2_premium     = trade.get("target_2")
+        confidence     = trade.get("confidence")
+
+        yf_ticker = _INDEX_YF.get(sym, f"{sym}.NS")
+
+        try:
+            hist = yf.Ticker(yf_ticker).history(period="1d", interval="1d")
+            if hist.empty:
+                results.append({"symbol": sym, "date": today, "error": "No price data"})
+                continue
+
+            row     = hist.iloc[-1]
+            open_p  = round(float(row["Open"]),  2)
+            high_p  = round(float(row["High"]),  2)
+            low_p   = round(float(row["Low"]),   2)
+            close_p = round(float(row["Close"]), 2)
+
+            day_chg_pts = round(close_p - open_p, 2)
+            day_chg_pct = round(day_chg_pts / open_p * 100, 2) if open_p else 0.0
+
+            actual_dir    = "UP" if close_p >= open_p else "DOWN"
+            predicted_dir = "UP" if signal == "CALL" else "DOWN"
+            was_correct   = actual_dir == predicted_dir
+
+            # Approximate intraday best/worst premium moves via ATM delta
+            if signal == "PUT":
+                # PUT premium improves when spot drops
+                worst_spot_move = high_p  - open_p   # spot UP = bad for put
+                best_spot_move  = open_p  - low_p    # spot DOWN = good for put
+            else:
+                worst_spot_move = open_p  - low_p    # spot DOWN = bad for call
+                best_spot_move  = high_p  - open_p   # spot UP = good for call
+
+            worst_premium = round(entry_premium - worst_spot_move * _ATM_DELTA, 2) if entry_premium else None
+            best_premium  = round(entry_premium + best_spot_move  * _ATM_DELTA, 2) if entry_premium else None
+            final_premium = round(entry_premium + (
+                -day_chg_pts if signal == "PUT" else day_chg_pts
+            ) * _ATM_DELTA, 2) if entry_premium else None
+
+            sl_hit       = bool(worst_premium and sl_premium and worst_premium <= sl_premium)
+            t1_reached   = bool(best_premium  and t1_premium  and best_premium  >= t1_premium)
+            t2_reached   = bool(best_premium  and t2_premium  and best_premium  >= t2_premium)
+
+            outcome = (
+                "TARGET_2_HIT"    if t2_reached  else
+                "TARGET_1_HIT"    if t1_reached  else
+                "SL_HIT"          if sl_hit       else
+                "DIRECTION_RIGHT" if was_correct  else
+                "DIRECTION_WRONG"
+            )
+
+            results.append({
+                "symbol":            sym,
+                "date":              today,
+                "signal":            signal,
+                "strike":            strike,
+                "confidence":        confidence,
+                "predicted_direction": predicted_dir,
+                "actual_direction":    actual_dir,
+                "was_correct":         was_correct,
+                "outcome":             outcome,
+                "index_open":          open_p,
+                "index_high":          high_p,
+                "index_low":           low_p,
+                "index_close":         close_p,
+                "day_change_pts":      day_chg_pts,
+                "day_change_pct":      day_chg_pct,
+                "entry_premium":       entry_premium,
+                "sl_premium":          sl_premium,
+                "target_1_premium":    t1_premium,
+                "target_2_premium":    t2_premium,
+                "est_final_premium":   final_premium,
+                "sl_hit":              sl_hit,
+                "target_1_reached":    t1_reached,
+                "target_2_reached":    t2_reached,
+                "note":                "Premium estimates use ATM delta=0.5 approximation",
+            })
+
+        except Exception as exc:
+            logger.warning("Post-market fetch failed for %s: %s", sym, exc)
+            results.append({"symbol": sym, "date": today, "error": str(exc)})
+
+    # Append to rolling accuracy log (one entry per trade per day)
+    acc_path = OUT_DIR / "prediction_accuracy.json"
+    log: list[dict] = []
+    if acc_path.exists():
+        with open(acc_path, encoding="utf-8") as f:
+            log = json.load(f)
+
+    # Replace any existing entries for today (idempotent re-runs)
+    log = [r for r in log if r.get("date") != today]
+    log.extend(results)
+    _save(log, acc_path)
+
+    _print_postmarket_summary(results, today, log)
+    logger.info("POST-MARKET TRACKER COMPLETE")
+    return {"date": today, "results": results}
+
+
+def _print_postmarket_summary(
+    results: list[dict],
+    today: str,
+    full_log: list[dict],
+) -> None:
+    sep = "=" * 70
+    print(f"\n{sep}")
+    print(f"  POST-MARKET OUTCOME  —  {today}")
+    print(sep)
+
+    outcome_icon = {
+        "TARGET_2_HIT":    "[T2]",
+        "TARGET_1_HIT":    "[T1]",
+        "SL_HIT":          "[SL]",
+        "DIRECTION_RIGHT": "[OK]",
+        "DIRECTION_WRONG": "[XX]",
+    }
+
+    for r in results:
+        if r.get("error"):
+            print(f"\n  {r['symbol']:12s}  ERROR: {r['error']}")
+            continue
+        icon = outcome_icon.get(r.get("outcome", ""), "[??]")
+        corr = "CORRECT" if r.get("was_correct") else "WRONG"
+        print(f"\n  {icon} {r['symbol']:10s} {r['signal']:4s}  "
+              f"Direction: {corr}  ({r.get('predicted_direction')} predicted / {r.get('actual_direction')} actual)")
+        print(f"       Index: O={r['index_open']}  H={r['index_high']}  "
+              f"L={r['index_low']}  C={r['index_close']}  "
+              f"({r['day_change_pts']:+.0f} pts  {r['day_change_pct']:+.2f}%)")
+        if r.get("entry_premium"):
+            print(f"       Premium: entry={r['entry_premium']}  "
+                  f"est.final={r.get('est_final_premium')}  "
+                  f"SL={r['sl_premium']}  T1={r['target_1_premium']}  T2={r.get('target_2_premium')}")
+            print(f"       SL hit={r['sl_hit']}  T1 reached={r['target_1_reached']}  "
+                  f"T2 reached={r['target_2_reached']}")
+
+    # Rolling accuracy stats across the full log
+    valid = [r for r in full_log if not r.get("error")]
+    if valid:
+        correct  = sum(1 for r in valid if r.get("was_correct"))
+        t1_hits  = sum(1 for r in valid if r.get("target_1_reached"))
+        t2_hits  = sum(1 for r in valid if r.get("target_2_reached"))
+        sl_hits  = sum(1 for r in valid if r.get("sl_hit"))
+        total    = len(valid)
+        print(f"\n  --- ROLLING ACCURACY ({total} trades tracked) ---")
+        print(f"  Direction correct : {correct}/{total}  ({correct/total*100:.1f}%)")
+        print(f"  Target 1 hit      : {t1_hits}/{total}  ({t1_hits/total*100:.1f}%)")
+        print(f"  Target 2 hit      : {t2_hits}/{total}  ({t2_hits/total*100:.1f}%)")
+        print(f"  SL hit            : {sl_hits}/{total}  ({sl_hits/total*100:.1f}%)")
+
     print(f"\n{sep}\n")

@@ -4,11 +4,13 @@ Entry point — runs analysis immediately or schedules it daily at IST times.
 Usage:
   python main.py                  # run morning analysis now (one-shot)
   python main.py --preopen        # run pre-open check now (one-shot)
-  python main.py --schedule       # block and run both every trading day
+  python main.py --postmarket     # run post-market outcome tracker now (one-shot)
+  python main.py --schedule       # block and run all three every trading day
 
 Scheduled runs (Asia/Kolkata timezone — correct regardless of laptop timezone):
   08:00 AM IST — full morning pre-market analysis
   09:00 AM IST — pre-open GO/WAIT/SKIP confirmation
+  03:30 PM IST — post-market outcome tracker (saves to prediction_accuracy.json)
 """
 
 import sys
@@ -58,6 +60,14 @@ def run_preopen_once() -> None:
         logger.exception("Pre-open check failed")
 
 
+def run_postmarket_once() -> None:
+    from src.orchestrator import run_postmarket_tracker
+    try:
+        run_postmarket_tracker()
+    except Exception:
+        logger.exception("Post-market tracker failed")
+
+
 def run_scheduled() -> None:
     """
     Timezone-aware scheduler loop.
@@ -65,11 +75,12 @@ def run_scheduled() -> None:
     Works correctly from any laptop timezone (Eastern, IST, UTC, etc.).
     """
     logger.info("Scheduler started — timezone: Asia/Kolkata (IST = UTC+5:30)")
-    logger.info("Targets: 08:00 AM IST (morning) | 09:00 AM IST (pre-open)")
+    logger.info("Targets: 08:00 AM (morning) | 09:00 AM (pre-open) | 03:30 PM (post-market)")
     logger.info("Press Ctrl-C to stop.")
 
-    last_morning_date: date | None = None
-    last_preopen_date: date | None = None
+    last_morning_date:    date | None = None
+    last_preopen_date:    date | None = None
+    last_postmarket_date: date | None = None
 
     while True:
         try:
@@ -78,17 +89,23 @@ def run_scheduled() -> None:
             h, m    = now_ist.hour, now_ist.minute
 
             if is_trading_day(today):
-                # 08:00 AM IST — morning window (fires once per day, m=0 only)
+                # 08:00 AM IST — morning analysis
                 if h == 8 and m == 0 and last_morning_date != today:
                     logger.info("Triggering 08:00 AM IST morning analysis (%s)", today)
                     run_morning_once()
                     last_morning_date = today
 
-                # 09:00 AM IST — pre-open window
+                # 09:00 AM IST — pre-open check
                 elif h == 9 and m == 0 and last_preopen_date != today:
                     logger.info("Triggering 09:00 AM IST pre-open check (%s)", today)
                     run_preopen_once()
                     last_preopen_date = today
+
+                # 03:30 PM IST — post-market outcome tracker
+                elif h == 15 and m == 30 and last_postmarket_date != today:
+                    logger.info("Triggering 03:30 PM IST post-market tracker (%s)", today)
+                    run_postmarket_once()
+                    last_postmarket_date = today
 
             else:
                 # Log once when the 8 AM window hits on a holiday/weekend
@@ -107,15 +124,19 @@ def run_scheduled() -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Indian Stock Market AI Agent")
-    parser.add_argument("--schedule", action="store_true",
-                        help="Run continuously, triggering at 08:00 and 09:00 AM IST daily")
-    parser.add_argument("--preopen",  action="store_true",
+    parser.add_argument("--schedule",   action="store_true",
+                        help="Run continuously: 08:00 morning, 09:00 pre-open, 15:30 post-market IST")
+    parser.add_argument("--preopen",    action="store_true",
                         help="Run the 9 AM pre-open check right now (one-shot)")
+    parser.add_argument("--postmarket", action="store_true",
+                        help="Run the post-market outcome tracker right now (one-shot)")
     args = parser.parse_args()
 
     if args.schedule:
         run_scheduled()
     elif args.preopen:
         run_preopen_once()
+    elif args.postmarket:
+        run_postmarket_once()
     else:
         run_morning_once()

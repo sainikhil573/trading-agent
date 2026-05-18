@@ -65,9 +65,20 @@ OI Analysis:
 India VIX Zones:
 - VIX < 13 = sell options (premium cheap, rangebound likely)
 - VIX 13-17 = normal trading conditions
-- VIX 17-22 = elevated — reduce size, widen SL by 20%
+- VIX 17-22 = elevated — reduce size
 - VIX 22-30 = high fear — only sell options or skip
 - VIX > 30 = crisis — no directional buying, hedged only
+
+Stop-Loss calculation based on VIX (MANDATORY — always use this formula):
+- VIX 13-17 (NORMAL)  : SL = 40% of entry premium
+- VIX 17-22 (ELEVATED): SL = 50% of entry premium
+- VIX > 22  (HIGH)    : SL = 60% of entry premium
+Example: entry=200, VIX=18 → SL = 200 × 0.50 = 100
+
+Mid-session recovery risk (assess for EVERY trade):
+- If max_pain_gap > 1000 pts AND spot is BELOW max pain → HIGH: market may bounce sharply mid-session toward max pain before resuming trend. Hold through recovery if overall bias remains bearish.
+- If PCR < 0.8 (heavy call writing = retail bullish) → HIGH: contrarian bounce risk for PUT trades
+- Otherwise → LOW
 
 Expiry awareness:
 - Thursday expiry: never buy options after 1 PM IST
@@ -180,6 +191,8 @@ Position size rules:
       },
       "reasoning": "4-5 sentences covering why each major layer supports this trade",
       "key_risk": "what would invalidate this trade",
+      "mid_session_recovery_risk": "HIGH/LOW — one sentence explaining recovery risk and how to handle it",
+      "entry_trigger": "Enter only after first 15-min candle closes. For PUT: enter only if [SYMBOL] spot trades BELOW [spot_price - 200] in first 30 min confirming bearish momentum. For CALL: enter only if [SYMBOL] spot trades ABOVE [spot_price + 200] in first 30 min. Replace [spot_price] with actual spot from data.",
       "filtered_out": false
     }
   ],
@@ -207,7 +220,10 @@ RULES NEVER BREAK:
 4. If major event today add strong warning in event_warnings
 5. If global and derivative signals contradict = reduce confidence by 1.5 automatically
 6. Always provide both target_1 and target_2
-7. Return ONLY the JSON object — no markdown, no preamble, no text outside JSON"""
+7. Return ONLY the JSON object — no markdown, no preamble, no text outside JSON
+8. Stop-loss MUST follow VIX formula: VIX 13-17→SL=40% of entry; VIX 17-22→SL=50%; VIX>22→SL=60%
+9. Every trade MUST include entry_trigger with the exact numeric price level filled in (not a placeholder)
+10. Every trade MUST include mid_session_recovery_risk = "HIGH" when max_pain_gap > 1000 pts OR PCR < 0.8"""
 
 
 PREOPEN_SYSTEM_PROMPT = """You are a senior F&O trading risk manager reviewing pre-open positions exactly 15 minutes before NSE opens (9:00 AM IST review for 9:15 AM open).
