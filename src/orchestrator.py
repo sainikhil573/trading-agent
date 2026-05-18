@@ -1,6 +1,7 @@
 """
-Orchestrator — runs one full analysis cycle and returns the trade brief.
-Called by the scheduler (main.py) every morning at 8 AM IST.
+Orchestrator — two daily analysis cycles:
+  run_morning_analysis()  — 8:00 AM IST full pre-market brief
+  run_preopen_analysis()  — 9:00 AM IST final GO/WAIT/SKIP check per trade
 """
 
 from __future__ import annotations
@@ -9,44 +10,61 @@ import logging
 from datetime import date
 from pathlib import Path
 
-from src.fetchers.nse_fetcher import NSEFetcher
-from src.fetchers.global_fetcher import fetch_global_cues
-from src.analyzers.signal_analyzer import build_market_signal, build_stock_signals
-from src.analyzers.claude_analyzer import ClaudeAnalyzer
+import pytz
+from datetime import datetime as _dt
+
+from src.fetchers.nse_fetcher       import NSEFetcher
+from src.fetchers.global_fetcher    import fetch_global_cues
+from src.fetchers.technical_fetcher import fetch_index_technicals, fetch_stock_technicals
+from src.fetchers.news_fetcher      import fetch_market_headlines
+from src.analyzers.signal_analyzer  import build_market_signal, build_stock_signals
+from src.analyzers.claude_analyzer  import ClaudeAnalyzer
 
 logger = logging.getLogger(__name__)
+IST    = pytz.timezone("Asia/Kolkata")
+
+OUT_DIR = Path("data/processed")
 
 
-def run_analysis(api_key: str) -> list[dict]:
+def _ist_now_str() -> str:
+    return _dt.now(IST).strftime("%H:%M IST")
+
+
+def _save(data: dict, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    logger.info("Saved -> %s", path)
+
+
+# ---------------------------------------------------------------------------
+# 8:00 AM — Morning analysis
+# ---------------------------------------------------------------------------
+
+def run_morning_analysis(api_key: str) -> dict:
     """
-    Full pipeline:
-      1. Fetch NSE data (option chains, VIX, FII/DII, top F&O stocks)
-      2. Fetch global cues
-      3. Build structured signals
-      4. Call Claude API for trade brief
-      5. Save output to data/processed/
-    Returns the list of trade recommendation dicts.
+    Full 6-layer pre-market analysis.
+    Saves to  data/processed/trade_brief_morning_YYYY-MM-DD.json
+    Returns the complete brief dict.
     """
     today = date.today().strftime("%Y-%m-%d")
     logger.info("=" * 70)
-    logger.info("ANALYSIS STARTED  —  %s", today)
+    logger.info("MORNING ANALYSIS STARTED  —  %s  (%s)", today, _ist_now_str())
     logger.info("=" * 70)
 
     nse = NSEFetcher()
 
-    # -- Step 1: NSE data ------------------------------------------------
-    logger.info("[1/4] Fetching NSE data...")
+    # -- Step 1: NSE derivative data -------------------------------------
+    logger.info("[1/6] Fetching NSE derivative data...")
 
-    vix = nse.fetch_india_vix()
-    logger.info("  India VIX        : %s", vix)
-
+    vix     = nse.fetch_india_vix()
     fii_dii = nse.fetch_fii_dii()
-    logger.info("  FII net (cr)     : %s | DII net (cr): %s",
-                fii_dii["fii_net_buy"], fii_dii["dii_net_buy"])
+    logger.info("  VIX: %s  |  FII net: %s cr  |  DII net: %s cr",
+                vix, fii_dii["fii_net_buy"], fii_dii["dii_net_buy"])
 
-    raw_nifty = nse.fetch_option_chain("NIFTY")
-    df_nifty, meta_nifty = nse.parse_option_chain(raw_nifty, "NIFTY")
-    max_pain_nifty = nse.calculate_max_pain(df_nifty)
+    raw_nifty  = nse.fetch_option_chain("NIFTY")
+    df_nifty,  meta_nifty  = nse.parse_option_chain(raw_nifty,  "NIFTY")
+    max_pain_n = nse.calculate_max_pain(df_nifty)
 
     raw_bn = nse.fetch_option_chain("BANKNIFTY")
     df_bn, meta_bn = nse.parse_option_chain(raw_bn, "BANKNIFTY")
@@ -54,96 +72,220 @@ def run_analysis(api_key: str) -> list[dict]:
 
     df_fno = nse.fetch_top_fno_stocks(top_n=10)
 
-    # -- Step 2: Global cues ---------------------------------------------
-    logger.info("[2/4] Fetching global cues...")
+    # -- Step 2: Participant OI + Block deals ----------------------------
+    logger.info("[2/6] Fetching institutional data...")
+    participant_oi = nse.fetch_participant_oi()
+    block_deals    = nse.fetch_block_deals()
+
+    # -- Step 3: Global cues --------------------------------------------
+    logger.info("[3/6] Fetching global cues...")
     global_cues = fetch_global_cues()
     logger.info("  Global bias: %s  (+%d / -%d)",
                 global_cues["overall_bias"],
                 global_cues["positive_count"],
                 global_cues["negative_count"])
 
-    # -- Step 3: Build signals -------------------------------------------
-    logger.info("[3/4] Building market signals...")
+    # -- Step 4: Technical indicators ------------------------------------
+    logger.info("[4/6] Fetching technical indicators...")
+    nifty_tech     = fetch_index_technicals("NIFTY")
+    banknifty_tech = fetch_index_technicals("BANKNIFTY")
+    stock_symbols  = df_fno["symbol"].tolist() if not df_fno.empty else []
+    stock_tech     = fetch_stock_technicals(stock_symbols[:10])
+
+    # -- Step 5: News headlines -----------------------------------------
+    logger.info("[5/6] Fetching news headlines...")
+    news = fetch_market_headlines(max_items=20)
+    logger.info("  Headlines: %d from %s", len(news["headlines"]), news["sources_ok"])
+
+    # -- Step 6: Build signals + Claude API ------------------------------
+    logger.info("[6/6] Building signals & calling Claude API...")
 
     nifty_signal = build_market_signal(
-        "NIFTY", meta_nifty, df_nifty, max_pain_nifty, vix,
-        global_cues["overall_bias"]
+        "NIFTY", meta_nifty, df_nifty, max_pain_n, vix, global_cues["overall_bias"]
     )
     banknifty_signal = build_market_signal(
-        "BANKNIFTY", meta_bn, df_bn, max_pain_bn, vix,
-        global_cues["overall_bias"]
+        "BANKNIFTY", meta_bn, df_bn, max_pain_bn, vix, global_cues["overall_bias"]
     )
-    stock_signals = build_stock_signals(df_fno)
-
-    logger.info("  NIFTY pre-bias   : %s", nifty_signal["pre_bias"])
-    logger.info("  BANKNIFTY pre-bias: %s", banknifty_signal["pre_bias"])
-
-    # -- Step 4: Claude API ----------------------------------------------
-    logger.info("[4/4] Calling Claude API...")
+    stock_signals_list = build_stock_signals(df_fno)
 
     analyzer = ClaudeAnalyzer(api_key=api_key)
-    trades = analyzer.generate_trade_brief(
-        nifty_signal=nifty_signal,
-        banknifty_signal=banknifty_signal,
-        global_cues=global_cues,
-        top_stocks=stock_signals,
-        analysis_date=date.today().strftime("%d-%b-%Y (%A)"),
+    brief = analyzer.generate_trade_brief(
+        nifty_signal     = nifty_signal,
+        banknifty_signal = banknifty_signal,
+        global_cues      = global_cues,
+        fii_dii          = fii_dii,
+        participant_oi   = participant_oi,
+        nifty_tech       = nifty_tech,
+        banknifty_tech   = banknifty_tech,
+        stock_signals    = stock_signals_list,
+        stock_technicals = stock_tech,
+        block_deals      = block_deals,
+        news             = news,
+        analysis_date    = date.today().strftime("%d-%b-%Y (%A)"),
     )
 
-    # -- Save outputs ----------------------------------------------------
-    out_dir = Path("data/processed")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # Attach raw context for the pre-open run later
+    brief["_meta"] = {
+        "vix_at_8am":     vix,
+        "global_bias_8am": global_cues["overall_bias"],
+    }
 
-    brief_path = out_dir / f"trade_brief_{today}.json"
-    with open(brief_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "date":            today,
-                "vix":             vix,
-                "fii_dii":         fii_dii,
-                "nifty_meta":      meta_nifty,
-                "banknifty_meta":  meta_bn,
-                "global_cues":     {k: v for k, v in global_cues.items()
-                                    if isinstance(v, dict)},
-                "global_bias":     global_cues["overall_bias"],
-                "trades":          trades,
-            },
-            f, indent=2,
-        )
-    logger.info("Trade brief saved -> %s", brief_path)
+    out_path = OUT_DIR / f"trade_brief_morning_{today}.json"
+    _save(brief, out_path)
 
-    # -- Print summary to stdout -----------------------------------------
-    _print_brief(trades, today, vix, global_cues["overall_bias"])
-
-    logger.info("ANALYSIS COMPLETE")
-    return trades
+    _print_morning_brief(brief, today)
+    logger.info("MORNING ANALYSIS COMPLETE")
+    return brief
 
 
-def _print_brief(trades: list[dict], today: str, vix: float | None, global_bias: str):
-    """Pretty-print the trade brief to console."""
-    sep = "=" * 70
+# ---------------------------------------------------------------------------
+# 9:00 AM — Pre-open confirmation
+# ---------------------------------------------------------------------------
+
+def run_preopen_analysis(api_key: str) -> dict:
+    """
+    Re-fetches VIX, global cues, news and asks Claude for GO/WAIT/SKIP per trade.
+    Saves to  data/processed/trade_brief_preopen_YYYY-MM-DD.json
+    Returns the pre-open review dict.
+    """
+    today = date.today().strftime("%Y-%m-%d")
+    logger.info("=" * 70)
+    logger.info("PRE-OPEN CHECK STARTED  —  %s  (%s)", today, _ist_now_str())
+    logger.info("=" * 70)
+
+    # Load morning brief
+    morning_path = OUT_DIR / f"trade_brief_morning_{today}.json"
+    if not morning_path.exists():
+        logger.warning("Morning brief not found at %s — running morning analysis first", morning_path)
+        morning = run_morning_analysis(api_key)
+    else:
+        with open(morning_path, encoding="utf-8") as f:
+            morning = json.load(f)
+
+    morning_trades  = morning.get("trades", [])
+    vix_at_8am      = morning.get("_meta", {}).get("vix_at_8am")
+
+    if not morning_trades:
+        logger.info("No morning trades to review — skipping pre-open Claude call")
+        result = {
+            "analysis_time": _ist_now_str(),
+            "note": "No morning trades to review",
+            "trades_review": [],
+        }
+        _save(result, OUT_DIR / f"trade_brief_preopen_{today}.json")
+        return result
+
+    # Fresh data
+    logger.info("[1/3] Re-fetching VIX...")
+    nse = NSEFetcher()
+    vix_now = nse.fetch_india_vix()
+    logger.info("  VIX now: %s  (was %s at 8 AM)", vix_now, vix_at_8am)
+
+    logger.info("[2/3] Re-fetching global cues...")
+    global_fresh = fetch_global_cues()
+
+    logger.info("[3/3] Re-fetching news headlines...")
+    news_fresh = fetch_market_headlines(max_items=10)
+
+    logger.info("Calling Claude API for pre-open decisions...")
+    analyzer = ClaudeAnalyzer(api_key=api_key)
+    preopen  = analyzer.generate_preopen_check(
+        morning_trades    = morning_trades,
+        vix_current       = vix_now,
+        vix_morning       = vix_at_8am,
+        global_cues_fresh = global_fresh,
+        news_fresh        = news_fresh,
+    )
+
+    out_path = OUT_DIR / f"trade_brief_preopen_{today}.json"
+    _save(preopen, out_path)
+
+    _print_preopen_brief(preopen, today)
+    logger.info("PRE-OPEN CHECK COMPLETE")
+    return preopen
+
+
+# ---------------------------------------------------------------------------
+# Console printers
+# ---------------------------------------------------------------------------
+
+def _print_morning_brief(brief: dict, today: str) -> None:
+    ctx    = brief.get("market_context", {})
+    trades = brief.get("trades", [])
+    sep    = "=" * 70
+
     print(f"\n{sep}")
-    print(f"  TRADE BRIEF  —  {today}   |  VIX: {vix}  |  Global: {global_bias}")
+    print(f"  MORNING TRADE BRIEF  —  {today}")
+    print(f"  Market:  {ctx.get('overall_market_bias','?')}  |  "
+          f"VIX zone: {ctx.get('vix_zone','?')}  |  "
+          f"Risk: {ctx.get('overall_risk_rating','?')}")
+    print(f"  Trading recommended: {ctx.get('trading_recommended', '?')}")
+    if ctx.get("trading_caution"):
+        print(f"  CAUTION: {ctx['trading_caution']}")
+    if brief.get("event_warnings"):
+        for w in brief["event_warnings"]:
+            print(f"  *** EVENT: {w}")
     print(sep)
 
     if not trades:
-        print("  No trades recommended today.")
-        print(sep)
-        return
+        print("  No trades recommended (confidence threshold not met).")
+        filt = brief.get("trades_filtered_out", [])
+        if filt:
+            print(f"  Filtered out: {', '.join(t.get('symbol','?') for t in filt)}")
+    else:
+        for t in trades:
+            bd = t.get("confidence_breakdown", {})
+            print(f"\n  {t.get('symbol','?')} — {t.get('signal','?')}  "
+                  f"(confidence: {t.get('confidence','?')}/10  |  "
+                  f"size: {t.get('position_size_recommendation','?')})")
+            print(f"  Strike/Expiry  : {t.get('strike','?')}  |  {t.get('expiry','?')}"
+                  + ("  *** EXPIRY DAY ***" if t.get("expiry_day_warning") else ""))
+            print(f"  Entry          : {t.get('entry_price','?')}")
+            print(f"  Stop-Loss      : {t.get('stop_loss','?')}")
+            print(f"  Target 1 / 2   : {t.get('target_1','?')} / {t.get('target_2','?')}")
+            print(f"  Risk:Reward    : 1:{t.get('risk_reward','?')}")
+            if bd:
+                scores = "  ".join(f"{k[:4]}={v}" for k, v in bd.items())
+                print(f"  Scores         : {scores}")
+            print(f"  Reasoning      : {t.get('reasoning','')}")
+            print(f"  Key Risk       : {t.get('key_risk','')}")
 
-    for t in trades:
-        sig = t.get("signal", "?")
-        conf = t.get("confidence", "?")
-        sym  = t.get("symbol", "?")
-        strike = t.get("strike", "?")
-        expiry = t.get("expiry", "?")
+    if brief.get("morning_summary"):
+        print(f"\n  Summary: {brief['morning_summary']}")
 
-        print(f"\n  {sym} — {sig}  (confidence: {conf}/10)")
-        print(f"  Strike/Expiry : {strike}  |  {expiry}")
-        print(f"  Entry         : {t.get('entry_price', '?')}")
-        print(f"  Stop-Loss     : {t.get('stop_loss', '?')}")
-        print(f"  Target        : {t.get('target', '?')}")
-        print(f"  Risk:Reward   : 1:{t.get('risk_reward', '?')}")
-        print(f"  Reasoning     : {t.get('reasoning', '')}")
+    lvl = brief.get("key_levels", {})
+    if lvl:
+        print(f"\n  NIFTY     S: {lvl.get('nifty_support')}   R: {lvl.get('nifty_resistance')}")
+        print(f"  BANKNIFTY S: {lvl.get('banknifty_support')}   R: {lvl.get('banknifty_resistance')}")
 
+    if brief.get("sectors_to_avoid_today"):
+        print(f"\n  Avoid sectors : {brief['sectors_to_avoid_today']}")
+    if brief.get("sectors_to_favor_today"):
+        print(f"  Favor sectors : {brief['sectors_to_favor_today']}")
+
+    print(f"\n{sep}\n")
+
+
+def _print_preopen_brief(preopen: dict, today: str) -> None:
+    sep = "=" * 70
+    print(f"\n{sep}")
+    print(f"  PRE-OPEN CHECK  —  {today}  |  "
+          f"VIX now: {preopen.get('vix_current','?')}  |  "
+          f"Global: {preopen.get('global_bias_current','?')}  |  "
+          f"Opening: {preopen.get('market_opening_outlook','?')}")
+    print(sep)
+
+    for tr in preopen.get("trades_review", []):
+        action = tr.get("final_action", "?")
+        sym    = tr.get("symbol", "?")
+        icon   = {"GO": "OK", "WAIT": "--", "SKIP": "XX"}.get(action, "??")
+        print(f"\n  [{icon}] {action:4s}  {sym} {tr.get('signal','?')} {tr.get('strike','?')}")
+        print(f"        Reason : {tr.get('final_action_reason','')}")
+        if tr.get("note"):
+            print(f"        Note   : {tr['note']}")
+        if tr.get("adjusted_entry"):
+            print(f"        Adj.Entry: {tr['adjusted_entry']}")
+
+    if preopen.get("preopen_summary"):
+        print(f"\n  {preopen['preopen_summary']}")
     print(f"\n{sep}\n")

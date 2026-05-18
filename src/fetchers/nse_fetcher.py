@@ -166,6 +166,108 @@ class NSEFetcher:
         return {"date": "", "fii_net_buy": 0.0, "dii_net_buy": 0.0}
 
     # ------------------------------------------------------------------
+    # Participant-wise OI (FII / DII / PRO / Client)
+    # ------------------------------------------------------------------
+
+    def fetch_participant_oi(self) -> dict:
+        """
+        Fetch FII/DII/PRO/Client participant-wise OI from NSE archives CSV.
+        Tries the last 4 weekdays until a valid file is found.
+
+        Returns dict with keys:
+          fii_long_pct, fii_futures_bias, fii/dii/pro/client sub-dicts,
+          data_date, error
+        """
+        import csv, io
+        from datetime import date, timedelta
+
+        for days_back in range(1, 6):
+            check = date.today() - timedelta(days=days_back)
+            if check.weekday() >= 5:
+                continue
+            ds  = check.strftime("%d%m%Y")
+            url = (
+                f"https://nsearchives.nseindia.com/content/nsccl/"
+                f"fao_participant_oi_{ds}.csv"
+            )
+            try:
+                resp = self._nse.s.get(url, timeout=15)
+                if resp.status_code != 200 or not resp.text.strip():
+                    continue
+                reader  = csv.DictReader(io.StringIO(resp.text))
+                result: dict[str, dict] = {}
+                for row in reader:
+                    ct = (row.get("Client Type") or "").strip()
+                    if ct not in ("FII", "DII", "PRO", "Client"):
+                        continue
+
+                    def _i(k: str) -> int:
+                        return int((row.get(k) or "0").replace(",", "") or 0)
+
+                    result[ct] = {
+                        "fut_idx_long":       _i("Future Index Long"),
+                        "fut_idx_short":      _i("Future Index Short"),
+                        "opt_call_long":      _i("Option Index Call Long"),
+                        "opt_call_short":     _i("Option Index Call Short"),
+                        "opt_put_long":       _i("Option Index Put Long"),
+                        "opt_put_short":      _i("Option Index Put Short"),
+                    }
+
+                if not result:
+                    continue
+
+                fii    = result.get("FII", {})
+                longs  = fii.get("fut_idx_long", 0)
+                shorts = fii.get("fut_idx_short", 0)
+                total  = longs + shorts
+                pct    = round(longs / total * 100, 1) if total > 0 else None
+
+                result["fii_long_pct"]    = pct
+                result["fii_futures_bias"] = (
+                    "BULLISH" if pct and pct > 60 else
+                    "BEARISH" if pct and pct < 40 else
+                    "NEUTRAL"
+                )
+                result["data_date"] = check.isoformat()
+                result["error"]     = None
+                logger.info(
+                    "  Participant OI (%s): FII longs %s%% → %s",
+                    check, pct, result["fii_futures_bias"]
+                )
+                return result
+
+            except Exception as exc:
+                logger.warning("Participant OI fetch failed for %s: %s", ds, exc)
+
+        return {"error": "Could not fetch participant OI", "fii_futures_bias": "UNKNOWN"}
+
+    # ------------------------------------------------------------------
+    # Block deals (previous trading day)
+    # ------------------------------------------------------------------
+
+    def fetch_block_deals(self) -> list[dict]:
+        """Fetch block deals from NSE. Returns list of deal dicts."""
+        try:
+            url  = "https://www.nseindia.com/api/block-deal"
+            resp = self._nse.s.get(url, timeout=10)
+            data = resp.json() if resp.ok else {}
+            deals = data.get("data", [])
+            result = []
+            for d in deals[:20]:
+                result.append({
+                    "symbol":   d.get("symbol", ""),
+                    "client":   d.get("clientName", ""),
+                    "buy_sell": d.get("buySell", ""),
+                    "qty":      d.get("quantity", 0),
+                    "price":    d.get("tradePrice", 0),
+                })
+            logger.info("  Block deals fetched: %d", len(result))
+            return result
+        except Exception as exc:
+            logger.warning("Block deals fetch failed: %s", exc)
+            return []
+
+    # ------------------------------------------------------------------
     # Top F&O stocks (by OI change)
     # ------------------------------------------------------------------
 

@@ -14,6 +14,8 @@ TICKERS = {
     "ES=F":      "S&P 500 Futures",
     "YM=F":      "Dow Jones Futures",
     "NQ=F":      "Nasdaq Futures",
+    "^N225":     "Nikkei 225",
+    "^HSI":      "Hang Seng",
     "CL=F":      "Crude Oil WTI",
     "USDINR=X":  "USD/INR",
     "GC=F":      "Gold Futures",
@@ -59,7 +61,7 @@ def fetch_global_cues() -> dict:
                     data["pct_change"] or 0)
 
         if data["pct_change"] is not None:
-            # Invert crude-oil and USD/INR: rising crude/rupee weakness = bearish for India
+            # Invert indicators that are bearish for India when rising
             if label in ("Crude Oil WTI", "USD/INR"):
                 if data["pct_change"] > 0.3:
                     negative += 1
