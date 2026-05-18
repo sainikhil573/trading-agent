@@ -124,10 +124,20 @@ def run_morning_analysis(api_key: str) -> dict:
         analysis_date    = date.today().strftime("%d-%b-%Y (%A)"),
     )
 
-    # Attach raw context for the pre-open run later
+    # Attach raw context for the dashboard and pre-open run
     brief["_meta"] = {
-        "vix_at_8am":     vix,
-        "global_bias_8am": global_cues["overall_bias"],
+        "vix_at_8am":       vix,
+        "global_bias_8am":  global_cues["overall_bias"],
+        "nifty_spot":       meta_nifty["spot"],
+        "nifty_pcr":        meta_nifty["pcr"],
+        "nifty_atm":        meta_nifty["atm_strike"],
+        "banknifty_spot":   meta_bn["spot"],
+        "banknifty_pcr":    meta_bn["pcr"],
+        "banknifty_atm":    meta_bn["atm_strike"],
+        "global_cues": {
+            k: v for k, v in global_cues.items() if isinstance(v, dict)
+        },
+        "fii_dii":          fii_dii,
     }
 
     out_path = OUT_DIR / f"trade_brief_morning_{today}.json"

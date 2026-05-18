@@ -44,10 +44,38 @@ def _get_api_key() -> str:
     return key
 
 
+def _launch_dashboard() -> None:
+    """Start the Streamlit dashboard in the background and open a browser tab."""
+    import subprocess, socket, webbrowser
+
+    port = 8501
+    dashboard = Path(__file__).parent / "src" / "dashboard" / "app.py"
+
+    # Only spawn a new process if nothing is already on the port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        already_running = s.connect_ex(("localhost", port)) == 0
+
+    if not already_running:
+        subprocess.Popen(
+            [sys.executable, "-m", "streamlit", "run", str(dashboard),
+             "--server.port", str(port),
+             "--server.headless", "true",
+             "--browser.gatherUsageStats", "false"],
+            cwd=str(Path(__file__).parent),
+        )
+        logger.info("Dashboard launching on http://localhost:%d", port)
+        time.sleep(3)
+    else:
+        logger.info("Dashboard already running on http://localhost:%d", port)
+
+    webbrowser.open(f"http://localhost:{port}")
+
+
 def run_morning_once() -> None:
     from src.orchestrator import run_morning_analysis
     try:
         run_morning_analysis(_get_api_key())
+        _launch_dashboard()
     except Exception:
         logger.exception("Morning analysis failed")
 
@@ -130,6 +158,8 @@ if __name__ == "__main__":
                         help="Run the 9 AM pre-open check right now (one-shot)")
     parser.add_argument("--postmarket", action="store_true",
                         help="Run the post-market outcome tracker right now (one-shot)")
+    parser.add_argument("--dashboard",  action="store_true",
+                        help="Launch the Streamlit dashboard only (no analysis run)")
     args = parser.parse_args()
 
     if args.schedule:
@@ -138,5 +168,7 @@ if __name__ == "__main__":
         run_preopen_once()
     elif args.postmarket:
         run_postmarket_once()
+    elif args.dashboard:
+        _launch_dashboard()
     else:
         run_morning_once()

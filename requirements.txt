@@ -5,3 +5,4 @@ python-dotenv>=1.0.0
 pytz>=2024.1
 jugaad-data>=0.33.1
 yfinance>=0.2.40
+streamlit>=1.35.0
