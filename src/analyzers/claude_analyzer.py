@@ -399,11 +399,35 @@ def build_morning_prompt(
     stock_technicals: list[dict],
     block_deals: list[dict],
     news: dict,
+    yesterday_memory: dict | None = None,
 ) -> str:
     headlines = news.get("headlines", [])
     news_lines = "\n".join(f"  {i+1:2d}. {h}" for i, h in enumerate(headlines)) or "  No headlines available"
 
-    return f"""=== PRE-MARKET ANALYSIS DATA — {analysis_date} ===
+    # Build yesterday memory section if available
+    ym_section = ""
+    if yesterday_memory and not yesterday_memory.get("error"):
+        ym  = yesterday_memory
+        tb  = ym.get("tomorrow_bias", {})
+        adj = tb.get("confidence_adjustment", 0)
+        adj_str  = f"{adj:+.1f}" if isinstance(adj, (int, float)) else "0.0"
+        worked   = "; ".join(ym.get("what_worked", [])[:3]) or "N/A"
+        failed   = "; ".join(ym.get("what_failed", [])[:3]) or "N/A"
+        wl_str   = ", ".join(str(v) for v in tb.get("watch_levels", [])) or "N/A"
+        ym_section = f"""
+
+## YESTERDAY'S MARKET MEMORY ({ym.get('date', 'prev day')})
+  Overall grade    : {ym.get('overall_grade', '?')}
+  Summary          : {ym.get('accuracy_summary', 'N/A')}
+  What worked      : {worked}
+  What failed      : {failed}
+  Key levels obs   : {ym.get('key_level_observations', 'N/A')}
+  Inst pattern     : {ym.get('institutional_pattern', 'N/A')}
+  Conf adjustment  : {adj_str} (apply this offset to today's overall confidence)
+  Watch levels     : {wl_str}
+  Key reminder     : {tb.get('key_reminder', 'N/A')}"""
+
+    return f"""=== PRE-MARKET ANALYSIS DATA — {analysis_date} ==={ym_section}
 
 ## LAYER 1: GLOBAL CUES  (overall bias: {global_cues.get('overall_bias','UNKNOWN')}  |  +{global_cues.get('positive_count',0)} / -{global_cues.get('negative_count',0)})
 {_fmt_global(global_cues)}
@@ -537,6 +561,7 @@ class ClaudeAnalyzer:
         block_deals: list[dict],
         news: dict,
         analysis_date: str | None = None,
+        yesterday_memory: dict | None = None,
     ) -> dict:
         """8 AM morning analysis — returns the full brief dict."""
         if analysis_date is None:
@@ -546,6 +571,7 @@ class ClaudeAnalyzer:
             analysis_date, nifty_signal, banknifty_signal, global_cues,
             fii_dii, participant_oi, nifty_tech, banknifty_tech,
             stock_signals, stock_technicals, block_deals, news,
+            yesterday_memory=yesterday_memory,
         )
         logger.info("Sending morning data to Claude API...")
         raw = self._call(MORNING_SYSTEM_PROMPT, prompt, max_tokens=4096)

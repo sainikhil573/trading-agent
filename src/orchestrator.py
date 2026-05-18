@@ -7,7 +7,7 @@ Orchestrator — two daily analysis cycles:
 from __future__ import annotations
 import json
 import logging
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytz
@@ -108,6 +108,17 @@ def run_morning_analysis(api_key: str) -> dict:
     )
     stock_signals_list = build_stock_signals(df_fno)
 
+    # Load yesterday's post-market memory (look back up to 7 days)
+    yesterday_memory: dict | None = None
+    for i in range(1, 8):
+        past = (date.today() - timedelta(days=i)).strftime("%Y-%m-%d")
+        pm_path = OUT_DIR / f"post_market_{past}.json"
+        if pm_path.exists():
+            with open(pm_path, encoding="utf-8") as f:
+                yesterday_memory = json.load(f)
+            logger.info("  Loaded market memory from %s", pm_path)
+            break
+
     analyzer = ClaudeAnalyzer(api_key=api_key)
     brief = analyzer.generate_trade_brief(
         nifty_signal     = nifty_signal,
@@ -122,6 +133,7 @@ def run_morning_analysis(api_key: str) -> dict:
         block_deals      = block_deals,
         news             = news,
         analysis_date    = date.today().strftime("%d-%b-%Y (%A)"),
+        yesterday_memory = yesterday_memory,
     )
 
     # Attach raw context for the dashboard and pre-open run
@@ -445,6 +457,132 @@ def run_postmarket_tracker() -> dict:
     _print_postmarket_summary(results, today, log)
     logger.info("POST-MARKET TRACKER COMPLETE")
     return {"date": today, "results": results}
+
+
+# ---------------------------------------------------------------------------
+# 3:30 PM IST — Post-market analysis (tracker + Claude grade)
+# ---------------------------------------------------------------------------
+
+def run_postmarket_analysis(api_key: str) -> dict:
+    """
+    Full 3:30 PM run: outcome tracking (no Claude) + Claude post-market grade.
+    Saves post_market_YYYY-MM-DD.json and enriches prediction_accuracy.json.
+    """
+    tracker_result = run_postmarket_tracker()
+
+    if not tracker_result or not tracker_result.get("results"):
+        return tracker_result or {}
+
+    today   = tracker_result["date"]
+    results = [r for r in tracker_result["results"] if not r.get("error")]
+
+    if not results:
+        logger.info("No valid results to grade — skipping Claude post-market call")
+        return tracker_result
+
+    morning_path = OUT_DIR / f"trade_brief_morning_{today}.json"
+    if not morning_path.exists():
+        logger.warning("Morning brief not found — skipping Claude grade")
+        return tracker_result
+
+    with open(morning_path, encoding="utf-8") as f:
+        morning = json.load(f)
+
+    from src.analyzers.post_market_analyzer import PostMarketAnalyzer
+    pm_analyzer = PostMarketAnalyzer(api_key=api_key)
+    pm_result   = pm_analyzer.generate_postmarket_analysis(today, results, morning)
+
+    # Enrich prediction_accuracy.json with Claude grades (PART 5)
+    if not pm_result.get("error"):
+        acc_path = OUT_DIR / "prediction_accuracy.json"
+        if acc_path.exists():
+            with open(acc_path, encoding="utf-8") as f:
+                log: list[dict] = json.load(f)
+            grade_map = {g["symbol"]: g for g in pm_result.get("trade_grades", [])}
+            for entry in log:
+                if entry.get("date") == today and entry.get("symbol") in grade_map:
+                    g = grade_map[entry["symbol"]]
+                    entry["claude_grade"]           = g.get("grade")
+                    entry["claude_grade_reasoning"] = g.get("grade_reasoning")
+            _save(log, acc_path)
+
+    logger.info("POST-MARKET ANALYSIS COMPLETE")
+    return {"date": today, "results": results, "post_market_analysis": pm_result}
+
+
+# ---------------------------------------------------------------------------
+# 9:15 AM IST — First candle check
+# ---------------------------------------------------------------------------
+
+def run_candle_check(api_key: str) -> dict:
+    """
+    9:15 AM NSE open — lightweight VIX + spot check.
+    Logs whether entry triggers from morning brief are still valid.
+    No new Claude call. Saves candle_check_YYYY-MM-DD.json.
+    """
+    today = date.today().strftime("%Y-%m-%d")
+    logger.info("=" * 70)
+    logger.info("9:15 AM CANDLE CHECK  —  %s  (%s)", today, _ist_now_str())
+    logger.info("=" * 70)
+
+    morning_path = OUT_DIR / f"trade_brief_morning_{today}.json"
+    if not morning_path.exists():
+        logger.warning("No morning brief for %s — skipping candle check", today)
+        return {}
+
+    with open(morning_path, encoding="utf-8") as f:
+        morning = json.load(f)
+
+    trades = morning.get("trades", [])
+    if not trades:
+        logger.info("No active trades — nothing to check at open")
+        return {}
+
+    # Load pre-open decisions if available
+    preopen_path = OUT_DIR / f"trade_brief_preopen_{today}.json"
+    action_map: dict[str, str] = {}
+    if preopen_path.exists():
+        with open(preopen_path, encoding="utf-8") as f:
+            po = json.load(f)
+        for tr in po.get("trades_review", []):
+            action_map[tr.get("symbol", "")] = tr.get("final_action", "?")
+
+    nse     = NSEFetcher()
+    vix_now = nse.fetch_india_vix()
+    global_now = fetch_global_cues()
+
+    logger.info("  VIX at open: %s  |  Global: %s", vix_now, global_now.get("overall_bias"))
+
+    sep = "=" * 70
+    print(f"\n{sep}")
+    print(f"  9:15 AM CANDLE CHECK  —  {today}")
+    print(f"  VIX: {vix_now}  |  Global: {global_now.get('overall_bias', '?')}")
+    print(f"  Wait for first 15-min candle close at 9:30 AM IST before entering.")
+    print(sep)
+
+    for t in trades:
+        sym    = t.get("symbol", "?")
+        sig    = t.get("signal", "?")
+        strike = t.get("strike", "?")
+        action = action_map.get(sym, "NOT REVIEWED")
+        trigger = t.get("entry_trigger", "Check morning brief")
+        icon = {"GO": "OK", "WAIT": "--", "SKIP": "XX"}.get(action, "??")
+        print(f"\n  [{icon}] {sym} {sig} {strike}  [Pre-open: {action}]")
+        print(f"       Trigger: {trigger}")
+
+    print(f"\n{sep}\n")
+
+    result = {
+        "date":                  today,
+        "time":                  _ist_now_str(),
+        "vix_at_open":           vix_now,
+        "global_bias_at_open":   global_now.get("overall_bias"),
+        "trades_active":         len(trades),
+        "pre_open_actions":      action_map,
+    }
+    _save(result, OUT_DIR / f"candle_check_{today}.json")
+    logger.info("CANDLE CHECK COMPLETE")
+    return result
 
 
 def _print_postmarket_summary(

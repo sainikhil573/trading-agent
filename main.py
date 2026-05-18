@@ -4,13 +4,16 @@ Entry point — runs analysis immediately or schedules it daily at IST times.
 Usage:
   python main.py                  # run morning analysis now (one-shot)
   python main.py --preopen        # run pre-open check now (one-shot)
-  python main.py --postmarket     # run post-market outcome tracker now (one-shot)
-  python main.py --schedule       # block and run all three every trading day
+  python main.py --candle         # run 9:15 AM candle check now (one-shot)
+  python main.py --postmarket     # run post-market analysis + Claude grade (one-shot)
+  python main.py --schedule       # block and run all four every trading day
+  python main.py --dashboard      # launch Streamlit dashboard only
 
 Scheduled runs (Asia/Kolkata timezone — correct regardless of laptop timezone):
   08:00 AM IST — full morning pre-market analysis
   09:00 AM IST — pre-open GO/WAIT/SKIP confirmation
-  03:30 PM IST — post-market outcome tracker (saves to prediction_accuracy.json)
+  09:15 AM IST — first candle check (VIX + spot vs entry triggers)
+  03:30 PM IST — post-market tracker + Claude grade (saves prediction_accuracy.json)
 """
 
 import sys
@@ -88,12 +91,20 @@ def run_preopen_once() -> None:
         logger.exception("Pre-open check failed")
 
 
-def run_postmarket_once() -> None:
-    from src.orchestrator import run_postmarket_tracker
+def run_candle_check_once() -> None:
+    from src.orchestrator import run_candle_check
     try:
-        run_postmarket_tracker()
+        run_candle_check(_get_api_key())
     except Exception:
-        logger.exception("Post-market tracker failed")
+        logger.exception("9:15 AM candle check failed")
+
+
+def run_postmarket_once() -> None:
+    from src.orchestrator import run_postmarket_analysis
+    try:
+        run_postmarket_analysis(_get_api_key())
+    except Exception:
+        logger.exception("Post-market analysis failed")
 
 
 def run_scheduled() -> None:
@@ -103,12 +114,14 @@ def run_scheduled() -> None:
     Works correctly from any laptop timezone (Eastern, IST, UTC, etc.).
     """
     logger.info("Scheduler started — timezone: Asia/Kolkata (IST = UTC+5:30)")
-    logger.info("Targets: 08:00 AM (morning) | 09:00 AM (pre-open) | 03:30 PM (post-market)")
+    logger.info("Targets: 08:00 AM (morning) | 09:00 AM (pre-open) | "
+                "09:15 AM (candle check) | 03:30 PM (post-market)")
     logger.info("Press Ctrl-C to stop.")
 
-    last_morning_date:    date | None = None
-    last_preopen_date:    date | None = None
-    last_postmarket_date: date | None = None
+    last_morning_date:     date | None = None
+    last_preopen_date:     date | None = None
+    last_candle_date:      date | None = None
+    last_postmarket_date:  date | None = None
 
     while True:
         try:
@@ -129,9 +142,15 @@ def run_scheduled() -> None:
                     run_preopen_once()
                     last_preopen_date = today
 
-                # 03:30 PM IST — post-market outcome tracker
+                # 09:15 AM IST — first candle check (NSE opens)
+                elif h == 9 and m == 15 and last_candle_date != today:
+                    logger.info("Triggering 09:15 AM IST candle check (%s)", today)
+                    run_candle_check_once()
+                    last_candle_date = today
+
+                # 03:30 PM IST — post-market tracker + Claude grade
                 elif h == 15 and m == 30 and last_postmarket_date != today:
-                    logger.info("Triggering 03:30 PM IST post-market tracker (%s)", today)
+                    logger.info("Triggering 03:30 PM IST post-market analysis (%s)", today)
                     run_postmarket_once()
                     last_postmarket_date = today
 
@@ -156,8 +175,10 @@ if __name__ == "__main__":
                         help="Run continuously: 08:00 morning, 09:00 pre-open, 15:30 post-market IST")
     parser.add_argument("--preopen",    action="store_true",
                         help="Run the 9 AM pre-open check right now (one-shot)")
+    parser.add_argument("--candle",     action="store_true",
+                        help="Run the 9:15 AM candle check right now (one-shot)")
     parser.add_argument("--postmarket", action="store_true",
-                        help="Run the post-market outcome tracker right now (one-shot)")
+                        help="Run post-market tracker + Claude grade right now (one-shot)")
     parser.add_argument("--dashboard",  action="store_true",
                         help="Launch the Streamlit dashboard only (no analysis run)")
     args = parser.parse_args()
@@ -166,6 +187,8 @@ if __name__ == "__main__":
         run_scheduled()
     elif args.preopen:
         run_preopen_once()
+    elif args.candle:
+        run_candle_check_once()
     elif args.postmarket:
         run_postmarket_once()
     elif args.dashboard:
