@@ -22,6 +22,7 @@ from src.analyzers.evaluation import (
 )
 from src.fetchers.data_availability import check_data_availability
 from src.fetchers.intraday_loader   import list_intraday_files, save_uploaded_csv
+from src.fetchers.broker_config     import get_provider_config
 from src.analyzers.evaluation       import get_first_30min_range
 
 # ---------------------------------------------------------------------------
@@ -670,15 +671,19 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Intraday data banner
+# Intraday data banner + provider status
+_prov_cfg  = _da.get("provider_config") or get_provider_config()
+_prov_name = _prov_cfg.get("provider", "csv").upper()
+_prov_miss = _prov_cfg.get("missing_creds", [])
+_prov_fall = _prov_cfg.get("fallback_active", False)
+
 _id_color = C["success"] if _da["intraday_available"] else C["amber"]
 _id_text  = (
     f'Intraday candles available for: {", ".join(_da["intraday_symbols"])} '
     f'→ outcome resolution will use fill sequence (not OHLC extremes)'
     if _da["intraday_available"] else
     "Intraday data missing: cannot confirm whether SL or target hit first. "
-    "Ambiguous outcomes marked OUTCOME_UNKNOWN — not counted in win rate. "
-    f"Provider: {_da['intraday_provider']}"
+    "Ambiguous outcomes marked OUTCOME_UNKNOWN — not counted in win rate."
 )
 st.markdown(
     f'<div style="background:#{"001020" if _da["intraday_available"] else "120800"};'
@@ -687,6 +692,36 @@ st.markdown(
     f'<span style="color:{_id_color};font-weight:700">[INTRADAY] </span>{_id_text}</div>',
     unsafe_allow_html=True,
 )
+
+# Provider status line
+_provider_label_color = C["success"] if not _prov_fall else C["amber"]
+_provider_status = (
+    f"Active provider: {_da['intraday_provider']}"
+    if not _prov_fall else
+    f"Provider: {_prov_name} requested but falling back to CSV "
+    f"(missing credentials: {', '.join(_prov_miss) or 'none'})"
+)
+st.markdown(
+    f'<div style="background:{C["card"]};border-left:3px solid {_provider_label_color};'
+    f'padding:7px 14px;font-family:monospace;font-size:12px;color:{C["text2"]};margin:2px 0">'
+    f'<span style="color:{_provider_label_color};font-weight:700">[PROVIDER] </span>'
+    f'{_provider_status}</div>',
+    unsafe_allow_html=True,
+)
+
+# Warn when broker provider is requested but credentials are incomplete
+if _prov_fall and _prov_miss:
+    _cred_warn = (
+        f"Set the following environment variables to enable the {_prov_name} provider: "
+        + ", ".join(_prov_miss)
+        + ". See docs/broker_data_providers.md. Never commit secrets to source control."
+    )
+    st.markdown(
+        f'<div style="background:#1a0800;border-left:3px solid {C["amber"]};'
+        f'padding:8px 14px;font-family:monospace;font-size:12px;color:#ffffff;margin:2px 0">'
+        f'<span style="color:{C["amber"]};font-weight:700">[CRED WARN] </span>{_cred_warn}</div>',
+        unsafe_allow_html=True,
+    )
 
 # Data quality warnings (PCR contrarian, missing FII/DII, etc.)
 if _dq["warnings"]:
