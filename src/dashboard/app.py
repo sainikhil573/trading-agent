@@ -719,6 +719,19 @@ else:
         rec_high    = "HIGH" in str(rec_risk).upper()
         expiry_warn = t.get("expiry_day_warning", False)
 
+        # Gate fields (present on new briefs; backward compat on old ones)
+        gate_status  = t.get("gate_status", "TRADE_ALLOWED")
+        gate_eff     = t.get("gate_effective_confidence")
+        gate_orig    = t.get("gate_original_confidence", conf)
+        gate_penalty = t.get("gate_data_penalty", 0)
+        gate_cap     = t.get("gate_confidence_cap")
+        GATE_COLORS  = {
+            "TRADE_ALLOWED":     C["success"],
+            "NO_TRADE":          C["amber"],
+            "DATA_INSUFFICIENT": C["red"],
+            "CONFLICTING_SIGNALS": C["red"],
+        }
+
         # FIX 4 — 4px solid left border (red for PUT, green for CALL)
         st.markdown(
             f'<div style="background:{C["card"]};border:1px solid {sig_c}44;'
@@ -729,6 +742,10 @@ else:
 
         hc1, hc2, hc3 = st.columns([4, 2, 1])
         with hc1:
+            gate_badge = (
+                _badge(gate_status, GATE_COLORS.get(gate_status, C["neutral"]), 12)
+                if gate_status != "TRADE_ALLOWED" else ""
+            )
             # FIX 2 — symbol at 28px bold
             st.markdown(
                 f'<div style="font-size:32px;font-weight:bold;font-family:monospace;'
@@ -736,14 +753,24 @@ else:
                 + _badge(sig, sig_c, 13)
                 + _badge(f"STRIKE {t.get('strike','?')}", "#1a2e1a", 13)
                 + _badge(t.get("expiry","?"), "#8b0000" if expiry_warn else "#1a2e1a", 13)
-                + (" " + _badge("EXPIRY TODAY", C["red"], 13) if expiry_warn else ""),
+                + (" " + _badge("EXPIRY TODAY", C["red"], 13) if expiry_warn else "")
+                + (" " + gate_badge if gate_badge else ""),
                 unsafe_allow_html=True,
             )
         with hc2:
+            cap_note = (
+                f'<div style="font-size:11px;color:{C["amber"]};font-family:monospace;margin-top:4px">'
+                f'eff: {gate_eff:.1f} (cap: {gate_cap})</div>'
+                if gate_cap is not None and gate_eff is not None else (
+                    f'<div style="font-size:11px;color:{C["amber"]};font-family:monospace;margin-top:4px">'
+                    f'eff: {gate_eff:.1f} (-{gate_penalty:.1f})</div>'
+                    if gate_penalty and gate_eff is not None else ""
+                )
+            )
             st.markdown(
                 f'<div style="font-size:12px;color:{C["neutral"]};letter-spacing:1px;'
                 f'font-family:monospace;margin-bottom:4px">POSITION SIZE</div>'
-                + _badge(size, size_c, 13),
+                + _badge(size, size_c, 13) + cap_note,
                 unsafe_allow_html=True,
             )
         with hc3:
@@ -986,6 +1013,69 @@ if filtered:
                 unsafe_allow_html=True,
             )
             st.markdown(f'<hr style="border-color:{C["border"]};margin:6px 0">', unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# BLOCKED TRADES — gated out by deterministic validation rules
+# ---------------------------------------------------------------------------
+
+_gated_out = brief.get("trades_gated_out", [])
+_gate_summary = brief.get("_gate_summary", {})
+
+if _gated_out:
+    st.markdown(_section_header("BLOCKED TRADES — GATED OUT"), unsafe_allow_html=True)
+
+    _gs_allowed = _gate_summary.get("allowed", len(trades_all))
+    _gs_blocked = _gate_summary.get("blocked", len(_gated_out))
+    _gs_penalty = _gate_summary.get("data_penalty", 0)
+    st.markdown(
+        f'<div style="font-family:monospace;font-size:13px;color:{C["amber"]};margin-bottom:8px">'
+        f'{_gs_blocked} trade(s) blocked by validation gates before recommendation. '
+        f'Data quality penalty applied: {_gs_penalty:.1f} pts off confidence.</div>',
+        unsafe_allow_html=True,
+    )
+
+    _GATE_STATUS_COLORS = {
+        "CONFLICTING_SIGNALS": C["red"],
+        "DATA_INSUFFICIENT":   "#ff9800",
+        "NO_TRADE":            C["amber"],
+    }
+    for _gt in _gated_out:
+        _gs_color = _GATE_STATUS_COLORS.get(_gt.get("gate_status",""), C["neutral"])
+        _gs_sig   = _gt.get("signal","?")
+        _gs_sig_c = SIG_COLOR.get(_gs_sig, C["neutral"])
+        st.markdown(
+            f'<div style="background:{C["card"]};border:1px solid {_gs_color}44;'
+            f'border-left:4px solid {_gs_color};border-radius:4px;'
+            f'padding:14px 16px;margin:6px 0">',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            _badge(_gt.get("symbol","?"), "#1a2e1a", 13)
+            + _badge(_gs_sig, _gs_sig_c, 13)
+            + _badge(_gt.get("gate_status","?"), _gs_color, 13)
+            + f'<span style="font-size:12px;color:{C["text2"]};font-family:monospace;margin-left:8px">'
+            f'ORIGINAL CONF: {_gt.get("gate_original_confidence","?")} → '
+            f'EFF: {_gt.get("gate_effective_confidence","?")}</span>',
+            unsafe_allow_html=True,
+        )
+        _gr = _gt.get("gate_reason","")
+        if _gr:
+            st.markdown(
+                f'<div style="font-size:13px;color:{_gs_color};font-family:monospace;'
+                f'margin-top:6px;line-height:1.6">{_gr}</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+elif brief.get("_gates_applied") and not trades_all and not _gated_out:
+    st.markdown(
+        f'<div style="background:#180800;border-left:3px solid {C["amber"]};'
+        f'padding:12px 16px;font-family:monospace;font-size:14px;color:#ffffff;margin:4px 0">'
+        f'[GATES APPLIED] No trades passed validation. '
+        f'Gate summary: penalty={_gate_summary.get("data_penalty",0):.1f} pts | '
+        f'missing layers={_gate_summary.get("missing_layers",[])}</div>',
+        unsafe_allow_html=True,
+    )
 
 st.markdown("---")
 
@@ -1253,16 +1343,19 @@ if not valid_log:
 else:
     total   = len(valid_log)
     correct = sum(1 for r in valid_log if r.get("was_correct"))
-    t1      = sum(1 for r in valid_log if r.get("target_1_reached"))
-    t2      = sum(1 for r in valid_log if r.get("target_2_reached"))
-    sl      = sum(1 for r in valid_log if r.get("sl_hit"))
+    t1      = sum(1 for r in valid_log if r.get("outcome") == "TARGET_1_HIT")
+    t2      = sum(1 for r in valid_log if r.get("outcome") == "TARGET_2_HIT")
+    sl      = sum(1 for r in valid_log if r.get("outcome") == "SL_HIT")
+    unk     = sum(1 for r in valid_log if r.get("outcome") == "OUTCOME_UNKNOWN")
 
-    am = st.columns(5)
+    am = st.columns(6)
     am[0].metric("TRADES",    total)
     am[1].metric("DIRECTION", f"{correct/total*100:.0f}%", f"{correct}/{total}")
     am[2].metric("TARGET 1",  f"{t1/total*100:.0f}%",      f"{t1}/{total}")
     am[3].metric("TARGET 2",  f"{t2/total*100:.0f}%",      f"{t2}/{total}")
     am[4].metric("SL HIT",    f"{sl/total*100:.0f}%",      f"{sl}/{total}")
+    am[5].metric("UNKNOWN",   unk, delta="need intraday data" if unk else None,
+                 delta_color="off")
 
     with st.expander("[LOG] Full outcome history"):
         df_log = pd.DataFrame(valid_log)

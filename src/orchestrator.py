@@ -19,6 +19,8 @@ from src.fetchers.technical_fetcher import fetch_index_technicals, fetch_stock_t
 from src.fetchers.news_fetcher      import fetch_market_headlines
 from src.analyzers.signal_analyzer  import build_market_signal, build_stock_signals
 from src.analyzers.claude_analyzer  import ClaudeAnalyzer
+from src.analyzers.evaluation       import derive_data_quality
+from src.analyzers.trade_gates      import apply_trade_gates
 
 # Fixed 20-stock F&O universe for daily signal generation
 FNO_UNIVERSE = [
@@ -165,6 +167,16 @@ def run_morning_analysis(api_key: str) -> dict:
         },
         "fii_dii":          fii_dii,
     }
+
+    # Apply deterministic trade gates (post-process Claude's output)
+    data_quality = derive_data_quality(brief["_meta"], brief.get("market_context", {}))
+    brief = apply_trade_gates(brief, data_quality, nifty_signal, banknifty_signal)
+
+    gs = brief.get("_gate_summary", {})
+    logger.info(
+        "Trade gates applied: %d allowed, %d blocked (data_penalty=%.1f)",
+        gs.get("allowed", 0), gs.get("blocked", 0), gs.get("data_penalty", 0),
+    )
 
     out_path = OUT_DIR / f"trade_brief_morning_{today}.json"
     _save(brief, out_path)
@@ -438,16 +450,17 @@ def run_postmarket_tracker() -> dict:
             t1_reached   = bool(best_premium  and t1_premium  and best_premium  >= t1_premium)
             t2_reached   = bool(best_premium  and t2_premium  and best_premium  >= t2_premium)
 
-            # T1/T2 only credited when overall direction was correct.
-            # When direction is wrong, OHLC extremes can show T1 "reached" via a
-            # temporary intraday bounce — but the adverse move likely hit SL first.
-            # Conservative rule: SL_HIT takes priority over T1 on directionally wrong calls.
+            # When both SL and target are touched via OHLC H/L extremes and direction
+            # is wrong, the intraday sequence is unknown — we cannot confirm which was
+            # hit first. Mark as OUTCOME_UNKNOWN rather than crediting either outcome.
+            # T1/T2 are only credited when direction was correct (unambiguous win).
             path_ambiguous = bool(sl_hit and (t1_reached or t2_reached) and not was_correct)
             outcome = (
-                "TARGET_2_HIT"    if t2_reached and was_correct else
-                "TARGET_1_HIT"    if t1_reached and was_correct else
-                "SL_HIT"          if sl_hit else
-                "DIRECTION_RIGHT" if was_correct else
+                "OUTCOME_UNKNOWN"  if path_ambiguous else
+                "TARGET_2_HIT"     if t2_reached and was_correct else
+                "TARGET_1_HIT"     if t1_reached and was_correct else
+                "SL_HIT"           if sl_hit else
+                "DIRECTION_RIGHT"  if was_correct else
                 "DIRECTION_WRONG"
             )
 
@@ -477,8 +490,8 @@ def run_postmarket_tracker() -> dict:
                 "target_2_reached":    t2_reached,
                 "path_ambiguous":      path_ambiguous,
                 "path_note": (
-                    "OHLC-only tracking: SL and target both triggered via day H/L extremes "
-                    "— intraday sequence unknown; SL_HIT assumed (direction was wrong)"
+                    "OHLC-only tracking: both SL and target triggered via day H/L extremes "
+                    "— intraday sequence unknown. Intraday tick data needed to confirm outcome."
                     if path_ambiguous else None
                 ),
                 "note":                "Premium estimates use ATM delta=0.5 approximation",
@@ -647,6 +660,7 @@ def _print_postmarket_summary(
         "SL_HIT":          "[SL]",
         "DIRECTION_RIGHT": "[OK]",
         "DIRECTION_WRONG": "[XX]",
+        "OUTCOME_UNKNOWN": "[??]",
     }
 
     for r in results:
@@ -671,14 +685,17 @@ def _print_postmarket_summary(
     valid = [r for r in full_log if not r.get("error")]
     if valid:
         correct  = sum(1 for r in valid if r.get("was_correct"))
-        t1_hits  = sum(1 for r in valid if r.get("target_1_reached"))
-        t2_hits  = sum(1 for r in valid if r.get("target_2_reached"))
-        sl_hits  = sum(1 for r in valid if r.get("sl_hit"))
+        t1_hits  = sum(1 for r in valid if r.get("outcome") == "TARGET_1_HIT")
+        t2_hits  = sum(1 for r in valid if r.get("outcome") == "TARGET_2_HIT")
+        sl_hits  = sum(1 for r in valid if r.get("outcome") == "SL_HIT")
+        unknown  = sum(1 for r in valid if r.get("outcome") == "OUTCOME_UNKNOWN")
         total    = len(valid)
         print(f"\n  --- ROLLING ACCURACY ({total} trades tracked) ---")
         print(f"  Direction correct : {correct}/{total}  ({correct/total*100:.1f}%)")
         print(f"  Target 1 hit      : {t1_hits}/{total}  ({t1_hits/total*100:.1f}%)")
         print(f"  Target 2 hit      : {t2_hits}/{total}  ({t2_hits/total*100:.1f}%)")
         print(f"  SL hit            : {sl_hits}/{total}  ({sl_hits/total*100:.1f}%)")
+        if unknown:
+            print(f"  OUTCOME_UNKNOWN   : {unknown}/{total}  (intraday sequence unavailable — not counted)")
 
     print(f"\n{sep}\n")

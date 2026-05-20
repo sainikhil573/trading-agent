@@ -77,7 +77,7 @@ class TestEvaluateAccuracyLog:
 
     def test_all_wrong_puts_sl_hit(self):
         log = [
-            {"was_correct": False, "signal": "PUT", "sl_hit": True,
+            {"was_correct": False, "signal": "PUT", "sl_hit": True, "outcome": "SL_HIT",
              "target_1_reached": False, "target_2_reached": False, "confidence": 7.2}
         ] * 2
         r = evaluate_accuracy_log(log)
@@ -90,19 +90,22 @@ class TestEvaluateAccuracyLog:
         log = [{
             "was_correct": False, "signal": "PUT", "sl_hit": True,
             "target_1_reached": True, "target_2_reached": False, "confidence": 7.1,
+            "outcome": "OUTCOME_UNKNOWN",
         }]
         r = evaluate_accuracy_log(log)
         assert r["ambiguous_outcomes"] == 1
-        assert "OHLC extremes" in (r["ambiguity_note"] or "")
+        assert "OHLC" in (r["ambiguity_note"] or "")
 
     def test_t1_only_credited_when_correct(self):
         """T1 should only count when direction was correct (matches outcome bug fix)."""
         log = [
-            {"was_correct": True,  "signal": "CALL", "sl_hit": False, "target_1_reached": True,  "target_2_reached": False, "confidence": 8.0},
-            {"was_correct": False, "signal": "PUT",  "sl_hit": True,  "target_1_reached": True,  "target_2_reached": False, "confidence": 7.1},
+            {"was_correct": True,  "signal": "CALL", "sl_hit": False, "outcome": "TARGET_1_HIT",
+             "target_1_reached": True, "target_2_reached": False, "confidence": 8.0},
+            {"was_correct": False, "signal": "PUT",  "sl_hit": True, "outcome": "OUTCOME_UNKNOWN",
+             "target_1_reached": True, "target_2_reached": False, "confidence": 7.1},
         ]
         r = evaluate_accuracy_log(log)
-        assert r["t1_correct_pct"] == 50.0  # only 1/2 counted
+        assert r["t1_correct_pct"] == 50.0  # only 1/2 credited via outcome string
 
     def test_skips_errored_entries(self):
         log = [
@@ -240,10 +243,10 @@ class TestNoTradeBehavior:
         assert result == []
 
     def test_conflicting_signal_both_triggers_ambiguous(self):
-        """2026-05-18 real data: PUT wrong dir + sl_hit + t1_reached = ambiguous."""
+        """2026-05-18 real data: PUT wrong dir + sl_hit + t1_reached → OUTCOME_UNKNOWN."""
         log = [
             {"symbol": "NIFTY", "date": "2026-05-18", "signal": "PUT",
-             "was_correct": False, "outcome": "SL_HIT",
+             "was_correct": False, "outcome": "OUTCOME_UNKNOWN",
              "sl_hit": True, "target_1_reached": True, "target_2_reached": False,
              "confidence": 7.1, "day_change_pct": 0.71},
             {"symbol": "BANKNIFTY", "date": "2026-05-18", "signal": "PUT",
@@ -253,7 +256,7 @@ class TestNoTradeBehavior:
         ]
         r = evaluate_accuracy_log(log)
         assert r["direction_pct"] == 0.0
-        # NIFTY entry is ambiguous (sl_hit + t1_reached + wrong direction)
+        # NIFTY entry is OUTCOME_UNKNOWN (sl_hit + t1_reached + wrong direction)
         assert r["ambiguous_outcomes"] == 1
         # T1 should NOT be credited since direction was wrong
         assert r["t1_correct_pct"] == 0.0

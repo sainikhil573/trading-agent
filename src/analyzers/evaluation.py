@@ -8,16 +8,30 @@ import re
 
 
 def evaluate_accuracy_log(log: list[dict]) -> dict:
-    """Summarize prediction_accuracy.json into audit stats."""
+    """
+    Summarize prediction_accuracy.json into audit stats.
+    Uses outcome strings (not raw booleans) for T1/T2/SL/UNKNOWN counts,
+    so OUTCOME_UNKNOWN entries are not inflating win rates.
+    """
     valid = [r for r in log if not r.get("error")]
     if not valid:
         return {"total": 0, "error": "No valid entries"}
 
     total   = len(valid)
     correct = sum(1 for r in valid if r.get("was_correct"))
-    sl_hits = sum(1 for r in valid if r.get("sl_hit"))
-    t1_hits = sum(1 for r in valid if r.get("target_1_reached") and r.get("was_correct"))
-    t2_hits = sum(1 for r in valid if r.get("target_2_reached") and r.get("was_correct"))
+
+    # Outcome-string based counts (honest — no ambiguous inflation)
+    t1_hits = sum(1 for r in valid if r.get("outcome") == "TARGET_1_HIT")
+    t2_hits = sum(1 for r in valid if r.get("outcome") == "TARGET_2_HIT")
+    sl_hits = sum(1 for r in valid if r.get("outcome") == "SL_HIT")
+    unknown = sum(1 for r in valid if r.get("outcome") == "OUTCOME_UNKNOWN")
+
+    # Backward compat: also count path_ambiguous entries not yet re-tracked
+    legacy_ambiguous = sum(
+        1 for r in valid
+        if r.get("path_ambiguous") and r.get("outcome") not in ("OUTCOME_UNKNOWN",)
+    )
+    ambiguous = unknown + legacy_ambiguous
 
     calls = [r for r in valid if r.get("signal") == "CALL"]
     puts  = [r for r in valid if r.get("signal") == "PUT"]
@@ -25,34 +39,29 @@ def evaluate_accuracy_log(log: list[dict]) -> dict:
     high_conf = [r for r in valid if (r.get("confidence") or 0) >= 8.0]
     low_conf  = [r for r in valid if (r.get("confidence") or 0) < 8.0]
 
-    ambiguous = sum(
-        1 for r in valid
-        if r.get("sl_hit") and (r.get("target_1_reached") or r.get("target_2_reached"))
-        and not r.get("was_correct")
-    )
-
     return {
-        "total":           total,
-        "direction_pct":   round(correct / total * 100, 1),
-        "sl_hit_pct":      round(sl_hits / total * 100, 1),
-        "t1_correct_pct":  round(t1_hits / total * 100, 1),
-        "t2_correct_pct":  round(t2_hits / total * 100, 1),
-        "call_count":      len(calls),
-        "put_count":       len(puts),
-        "call_correct":    sum(1 for r in calls if r.get("was_correct")),
-        "put_correct":     sum(1 for r in puts  if r.get("was_correct")),
-        "high_conf_correct_pct": (
+        "total":                  total,
+        "direction_pct":          round(correct / total * 100, 1),
+        "sl_hit_pct":             round(sl_hits / total * 100, 1),
+        "t1_correct_pct":         round(t1_hits / total * 100, 1),
+        "t2_correct_pct":         round(t2_hits / total * 100, 1),
+        "outcome_unknown_count":  unknown,
+        "call_count":             len(calls),
+        "put_count":              len(puts),
+        "call_correct":           sum(1 for r in calls if r.get("was_correct")),
+        "put_correct":            sum(1 for r in puts  if r.get("was_correct")),
+        "high_conf_correct_pct":  (
             round(sum(1 for r in high_conf if r.get("was_correct")) / len(high_conf) * 100, 1)
             if high_conf else None
         ),
-        "low_conf_correct_pct": (
+        "low_conf_correct_pct":   (
             round(sum(1 for r in low_conf if r.get("was_correct")) / len(low_conf) * 100, 1)
             if low_conf else None
         ),
-        "ambiguous_outcomes": ambiguous,
+        "ambiguous_outcomes":     ambiguous,
         "ambiguity_note": (
-            f"{ambiguous}/{total} outcomes had SL and target both triggered via OHLC extremes "
-            f"(intraday sequence unknown — outcomes may be inflated)"
+            f"{ambiguous}/{total} outcome(s) marked OUTCOME_UNKNOWN "
+            f"(daily OHLC cannot confirm SL vs target sequence)"
             if ambiguous else None
         ),
     }
