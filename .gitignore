@@ -7,3 +7,4 @@ data/processed/
 logs/
 .venv/
 venv/
+.claude/
