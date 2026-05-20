@@ -172,7 +172,7 @@ def fetch_index_technicals(symbol: str) -> dict:
 
 
 def fetch_stock_technicals(symbols: list[str]) -> list[dict]:
-    """Fetch RSI + MACD + EMA-20 for a list of NSE stock symbols."""
+    """Full technical snapshot for a list of NSE F&O stocks via yfinance."""
     results = []
     for sym in symbols:
         try:
@@ -180,25 +180,53 @@ def fetch_stock_technicals(symbols: list[str]) -> list[dict]:
             if hist.empty or len(hist) < 27:
                 results.append({"symbol": sym, "error": "Insufficient data"})
                 continue
+
             close  = hist["Close"]
+            vol    = hist["Volume"]
+
+            curr       = round(float(close.iloc[-1]), 2)
+            prev_close = round(float(close.iloc[-2]), 2)
+            price_chg  = round((curr - prev_close) / prev_close * 100, 2) if prev_close else 0.0
+
             rsi_v  = _rsi(close)
             macd_v = _macd(close)
             e20    = _ema(close, 20)
-            curr   = round(float(close.iloc[-1]), 2)
-            bias   = (
+            e50    = _ema(close, 50)
+
+            ema_trend = (
+                "STRONG_BULL" if curr > e20 > e50 else
+                "STRONG_BEAR" if curr < e20 < e50 else
+                "MIXED"
+            )
+
+            avg_vol   = float(vol.rolling(20).mean().iloc[-1])
+            curr_vol  = float(vol.iloc[-1])
+            vol_ratio = round(curr_vol / avg_vol, 2) if avg_vol else 1.0
+
+            prev_row = hist.iloc[-2]
+            pd_high  = round(float(prev_row["High"]), 2)
+            pd_low   = round(float(prev_row["Low"]),  2)
+
+            bias = (
                 "BULLISH" if curr > e20 and rsi_v and rsi_v > 50 else
                 "BEARISH" if curr < e20 and rsi_v and rsi_v < 50 else
                 "NEUTRAL"
             )
             results.append({
-                "symbol": sym,
-                "close":  curr,
-                "ema_20": e20,
-                "rsi_14": rsi_v,
-                "rsi_zone": _rsi_zone(rsi_v),
-                "macd":   macd_v,
-                "bias":   bias,
-                "error":  None,
+                "symbol":           sym,
+                "close":            curr,
+                "price_change_pct": price_chg,
+                "ema_20":           e20,
+                "ema_50":           e50,
+                "ema_trend":        ema_trend,
+                "rsi_14":           rsi_v,
+                "rsi_zone":         _rsi_zone(rsi_v),
+                "macd":             macd_v,
+                "volume_vs_avg":    vol_ratio,
+                "prev_day_high":    pd_high,
+                "prev_day_low":     pd_low,
+                "bias":             bias,
+                "error":            None,
             })
         except Exception as exc:
             logger.warning("Stock technical failed for %s: %s", sym, exc)

@@ -205,6 +205,23 @@ Position size rules:
       "filtered_out": true
     }
   ],
+  "stock_trades": [
+    {
+      "symbol": "TATASTEEL",
+      "signal": "PUT",
+      "confidence": 7.5,
+      "entry_price": 18.0,
+      "stop_loss": 12.0,
+      "target_1": 28.0,
+      "target_2": 38.0,
+      "risk_reward": 2.0,
+      "trigger": "RSI 32, below 20 EMA, crude headwind confirms downtrend",
+      "position_size": "HALF",
+      "sector": "METALS",
+      "sector_aligned": false,
+      "reasoning": "3-4 sentences: technical pattern, why signal triggered, sector context, key risk"
+    }
+  ],
   "morning_summary": "3-4 sentence plain English summary a trader can read in 30 seconds",
   "stocks_to_watch": [],
   "sectors_to_avoid_today": [],
@@ -213,17 +230,49 @@ Position size rules:
   "event_warnings": []
 }
 
+=== STOCK F&O SIGNAL GENERATION — 20 HIGH-LIQUIDITY STOCKS ===
+After completing the 6-layer index analysis, analyze each stock in the F&O UNIVERSE data:
+
+STOCK SIGNAL RULES:
+- CALL setup  : STRONG_BULL ema_trend + RSI recovering from <45 + MACD histogram turning positive + Vol/Avg > 1.2
+- PUT setup   : STRONG_BEAR ema_trend + RSI failing below 55 + MACD histogram negative/falling + Vol/Avg > 1.2
+- NEUTRAL     : MIXED trend, conflicting signals, or Vol/Avg < 0.8 (low conviction)
+- OVERSOLD CALL: RSI < 30 + price near prev_day_low + any hint of volume pickup
+- OVERBOUGHT PUT: RSI > 70 + price near prev_day_high + volume declining
+
+SECTOR ALIGNMENT (add 0.5 to confidence when stock sector matches the day's dominant macro theme):
+- IT stocks (TCS, INFY, WIPRO): aligned with USD/INR rise (bullish) or US tech selloff (bearish)
+- METALS (TATASTEEL, HINDALCO): aligned with global growth/recession tone + crude direction
+- ENERGY (ONGC, BPCL): aligned with crude oil move — crude up → PUT; crude down → CALL
+- BANKS (HDFCBANK, ICICIBANK, AXISBANK, KOTAKBANK, SBIN, BAJFINANCE): aligned with BankNifty bias
+- AUTO (MARUTI, TATAMOTORS): aligned with crude (high crude = bearish for margins)
+- PHARMA (SUNPHARMA, DRREDDY): defensive, aligned with risk-off environment
+- INFRA/CONGLOM (LT, ADANIENT, RELIANCE): aligned with domestic growth signals
+
+ENTRY PRICE for stock options (approximate ATM near-month premium):
+- Stock price ₹100-500   → option premium ≈ stock_price × 2.5-4%
+- Stock price ₹500-2000  → option premium ≈ stock_price × 1.5-2.5%
+- Stock price ₹2000+     → option premium ≈ stock_price × 1.0-1.5%
+Apply VIX formula for SL: VIX 17-22 → SL = 50% of entry_price
+
+OUTPUT RULES FOR STOCKS:
+- Include in stock_trades[] ONLY if confidence >= 7.0
+- Maximum 5 stock trades per day (take highest confidence ones)
+- Stocks below 7.0 do NOT need to appear in trades_filtered_out (omit them silently)
+- Each stock_trade MUST have: symbol, signal, confidence, entry_price, stop_loss, target_1, target_2, risk_reward, trigger, position_size, sector, sector_aligned, reasoning
+
 RULES NEVER BREAK:
 1. Never recommend trade with confidence below 7.0
-2. Never recommend more than 3 trades per day
+2. Index trades (trades[]): max 2; stock trades (stock_trades[]): max 5
 3. If VIX > 25 set trading_recommended = false
 4. If major event today add strong warning in event_warnings
 5. If global and derivative signals contradict = reduce confidence by 1.5 automatically
 6. Always provide both target_1 and target_2
 7. Return ONLY the JSON object — no markdown, no preamble, no text outside JSON
 8. Stop-loss MUST follow VIX formula: VIX 13-17→SL=40% of entry; VIX 17-22→SL=50%; VIX>22→SL=60%
-9. Every trade MUST include entry_trigger with the exact numeric price level filled in (not a placeholder)
-10. Every trade MUST include mid_session_recovery_risk = "HIGH" when max_pain_gap > 1000 pts OR PCR < 0.8"""
+9. Every index trade MUST include entry_trigger with the exact numeric price level filled in
+10. Every index trade MUST include mid_session_recovery_risk = "HIGH" when max_pain_gap > 1000 pts OR PCR < 0.8
+11. stock_trades[] must always be present (use empty array [] if no stocks qualify)"""
 
 
 PREOPEN_SYSTEM_PROMPT = """You are a senior F&O trading risk manager reviewing pre-open positions exactly 15 minutes before NSE opens (9:00 AM IST review for 9:15 AM open).
@@ -374,6 +423,32 @@ def _fmt_stocks(df_rows: list[dict], technicals: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _fmt_stock_universe(technicals: list[dict]) -> str:
+    """Format the 20-stock F&O universe for Claude — one rich data line per stock."""
+    hdr = (
+        f"  {'Symbol':12s} | {'Price':>8s} | {'%Chg':>6s} | "
+        f"{'RSI':>5s} {'Zone':>12s} | "
+        f"{'EMA20':>7s} {'EMA50':>7s} {'Trend':>11s} | "
+        f"{'MACDh':>7s} {'MCDBias':>9s} | {'Vol/Avg':>7s} | {'PDH':>8s} {'PDL':>8s}"
+    )
+    lines = [hdr]
+    for t in technicals:
+        if t.get("error"):
+            lines.append(f"  {t['symbol']:12s} | ERROR: {t['error']}")
+            continue
+        macd  = t.get("macd", {})
+        cross = macd.get("crossover") or macd.get("bias", "N/A")
+        lines.append(
+            f"  {t['symbol']:12s} | {t['close']:>8.2f} | {t.get('price_change_pct', 0):>+6.2f}% | "
+            f"{str(t.get('rsi_14','?')):>5s} {t.get('rsi_zone','?'):>12s} | "
+            f"{t.get('ema_20','?'):>7} {t.get('ema_50','?'):>7} {t.get('ema_trend','?'):>11s} | "
+            f"{str(macd.get('histogram','?')):>7s} {cross:>9s} | "
+            f"{t.get('volume_vs_avg', 1.0):>7.2f}x | "
+            f"{t.get('prev_day_high','?'):>8} {t.get('prev_day_low','?'):>8}"
+        )
+    return "\n".join(lines)
+
+
 def _fmt_block_deals(deals: list[dict]) -> str:
     if not deals:
         return "  No block deals data"
@@ -400,6 +475,7 @@ def build_morning_prompt(
     block_deals: list[dict],
     news: dict,
     yesterday_memory: dict | None = None,
+    fno_universe_technicals: list[dict] | None = None,
 ) -> str:
     headlines = news.get("headlines", [])
     news_lines = "\n".join(f"  {i+1:2d}. {h}" for i, h in enumerate(headlines)) or "  No headlines available"
@@ -472,10 +548,14 @@ def build_morning_prompt(
 ## BLOCK DEALS (previous trading day)
 {_fmt_block_deals(block_deals)}
 
+## F&O UNIVERSE — 20 STOCKS FOR SIGNAL GENERATION (analyze each for CALL/PUT/NEUTRAL)
+{_fmt_stock_universe(fno_universe_technicals) if fno_universe_technicals else "  Data unavailable"}
+
 ---
-Perform all 6 layers of analysis and return the trade brief JSON.
-Include NIFTY, BANKNIFTY, and up to 1 stock trade where confidence >= 7.0.
-Maximum 3 trades. Prioritise index trades."""
+Perform all 6 layers of index analysis, then generate stock_trades[] for the 20 F&O stocks above.
+Index trades (trades[]): max 2 where confidence >= 7.0. Prioritize index trades.
+Stock trades (stock_trades[]): max 5 where confidence >= 7.0. Omit stocks below 7.0 silently.
+Return ONLY the complete JSON object."""
 
 
 def build_preopen_prompt(
@@ -562,6 +642,7 @@ class ClaudeAnalyzer:
         news: dict,
         analysis_date: str | None = None,
         yesterday_memory: dict | None = None,
+        fno_universe_technicals: list[dict] | None = None,
     ) -> dict:
         """8 AM morning analysis — returns the full brief dict."""
         if analysis_date is None:
@@ -572,17 +653,19 @@ class ClaudeAnalyzer:
             fii_dii, participant_oi, nifty_tech, banknifty_tech,
             stock_signals, stock_technicals, block_deals, news,
             yesterday_memory=yesterday_memory,
+            fno_universe_technicals=fno_universe_technicals,
         )
-        logger.info("Sending morning data to Claude API...")
-        raw = self._call(MORNING_SYSTEM_PROMPT, prompt, max_tokens=4096)
+        logger.info("Sending morning data to Claude API (20 stock universe included)...")
+        raw = self._call(MORNING_SYSTEM_PROMPT, prompt, max_tokens=6000)
 
         try:
             brief = json.loads(raw)
             if not isinstance(brief, dict):
                 raise ValueError("Expected a JSON object")
             logger.info(
-                "Claude morning brief: %d trades recommended, %d filtered out",
+                "Claude morning brief: %d index trades, %d stock trades, %d filtered out",
                 len(brief.get("trades", [])),
+                len(brief.get("stock_trades", [])),
                 len(brief.get("trades_filtered_out", [])),
             )
             return brief
