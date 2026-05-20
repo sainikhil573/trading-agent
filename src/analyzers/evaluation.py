@@ -5,6 +5,12 @@ Reads from prediction_accuracy.json; does NOT call external APIs or Claude.
 
 from __future__ import annotations
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+_ATM_DELTA = 0.5  # crude ATM delta approximation for premium estimation
 
 
 def evaluate_accuracy_log(log: list[dict]) -> dict:
@@ -233,4 +239,192 @@ def explain_outcome(result: dict) -> str:
         lines.append("Target 1 reached")
     if result.get("target_2_reached") and correct:
         lines.append("Target 2 reached")
+    if result.get("data_source") == "INTRADAY":
+        lines.append("Data source: intraday candles (fill sequence confirmed)")
+    elif result.get("data_source") == "DAILY_OHLC":
+        lines.append("Data source: daily OHLC (intraday sequence not confirmed)")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Intraday-aware outcome resolution
+# ---------------------------------------------------------------------------
+
+def resolve_outcome_with_intraday(
+    trade: dict,
+    daily_ohlc: dict,
+    intraday_candles: "pd.DataFrame | None" = None,
+) -> dict:
+    """
+    Resolve trade outcome using intraday candles when available; fall back to
+    daily OHLC otherwise.
+
+    Parameters
+    ----------
+    trade            : trade dict with signal, entry_price, stop_loss, target_1, target_2
+    daily_ohlc       : {"open_p", "high_p", "low_p", "was_correct"} from yfinance
+    intraday_candles : DataFrame with columns [datetime, open, high, low, close, volume]
+                       sorted chronologically; None or empty → daily OHLC fallback
+
+    Returns
+    -------
+    {
+      "outcome":          str,   # TARGET_2_HIT | TARGET_1_HIT | SL_HIT |
+                                 # DIRECTION_RIGHT | DIRECTION_WRONG | OUTCOME_UNKNOWN
+      "sl_hit":           bool,
+      "target_1_reached": bool,
+      "target_2_reached": bool,
+      "path_ambiguous":   bool,
+      "path_note":        str | None,
+      "data_source":      "INTRADAY" | "DAILY_OHLC",
+    }
+    """
+    import pandas as pd
+
+    signal    = trade.get("signal", "")
+    entry_prem = trade.get("entry_price")
+    sl_prem    = trade.get("stop_loss")
+    t1_prem    = trade.get("target_1")
+    t2_prem    = trade.get("target_2")
+
+    has_intraday = (
+        intraday_candles is not None
+        and isinstance(intraday_candles, pd.DataFrame)
+        and not intraday_candles.empty
+        and entry_prem is not None
+        and sl_prem is not None
+        and t1_prem is not None
+    )
+
+    if has_intraday:
+        return _resolve_intraday(signal, entry_prem, sl_prem, t1_prem, t2_prem,
+                                 intraday_candles, daily_ohlc)
+    return _resolve_daily_ohlc(signal, entry_prem, sl_prem, t1_prem, t2_prem, daily_ohlc)
+
+
+def _resolve_intraday(signal, entry_prem, sl_prem, t1_prem, t2_prem, df, daily_ohlc):
+    """Determine SL vs target hit order from intraday candle sequence."""
+    was_correct = daily_ohlc.get("was_correct", False)
+
+    # Use first candle's open as proxy for spot at trade entry
+    entry_spot = float(df.iloc[0]["open"])
+    cum_high   = entry_spot
+    cum_low    = entry_spot
+
+    sl_time = t1_time = t2_time = None
+
+    for _, candle in df.iterrows():
+        cum_high = max(cum_high, float(candle["high"]))
+        cum_low  = min(cum_low,  float(candle["low"]))
+
+        if signal == "PUT":
+            worst_prem = entry_prem - (cum_high - entry_spot) * _ATM_DELTA
+            best_prem  = entry_prem + (entry_spot - cum_low)  * _ATM_DELTA
+        else:
+            worst_prem = entry_prem - (entry_spot - cum_low)  * _ATM_DELTA
+            best_prem  = entry_prem + (cum_high - entry_spot) * _ATM_DELTA
+
+        ts = candle["datetime"]
+        if sl_time is None and sl_prem and worst_prem <= sl_prem:
+            sl_time = ts
+        if t1_time is None and t1_prem and best_prem >= t1_prem:
+            t1_time = ts
+        if t2_prem and t2_time is None and best_prem >= t2_prem:
+            t2_time = ts
+
+    sl_hit     = sl_time is not None
+    t1_reached = t1_time is not None
+    t2_reached = t2_time is not None
+
+    # Chronological order determines outcome
+    if sl_hit and t1_reached:
+        if sl_time <= t1_time:
+            # SL was hit first — trade stopped out regardless of later recovery
+            outcome      = "SL_HIT"
+            t1_reached   = False
+            t2_reached   = False
+        else:
+            # Target hit first
+            if t2_reached and t2_time and t2_time <= sl_time:
+                outcome = "TARGET_2_HIT"
+            else:
+                outcome    = "TARGET_1_HIT"
+                t2_reached = False
+    elif sl_hit:
+        outcome = "SL_HIT"
+    elif t2_reached and was_correct:
+        outcome = "TARGET_2_HIT"
+    elif t1_reached and was_correct:
+        outcome = "TARGET_1_HIT"
+    elif was_correct:
+        outcome = "DIRECTION_RIGHT"
+    else:
+        outcome = "DIRECTION_WRONG"
+
+    return {
+        "outcome":          outcome,
+        "sl_hit":           outcome == "SL_HIT",
+        "target_1_reached": outcome in ("TARGET_1_HIT", "TARGET_2_HIT"),
+        "target_2_reached": outcome == "TARGET_2_HIT",
+        "path_ambiguous":   False,
+        "path_note":        None,
+        "data_source":      "INTRADAY",
+    }
+
+
+def _resolve_daily_ohlc(signal, entry_prem, sl_prem, t1_prem, t2_prem, daily_ohlc):
+    """Daily OHLC fallback — cannot determine SL vs target hit chronological order."""
+    open_p      = daily_ohlc.get("open_p", 0)
+    high_p      = daily_ohlc.get("high_p", 0)
+    low_p       = daily_ohlc.get("low_p", 0)
+    was_correct = daily_ohlc.get("was_correct", False)
+
+    if entry_prem is None:
+        return {
+            "outcome":          "OUTCOME_UNKNOWN",
+            "sl_hit":           False,
+            "target_1_reached": False,
+            "target_2_reached": False,
+            "path_ambiguous":   True,
+            "path_note":        "No entry premium — cannot estimate outcome from OHLC",
+            "data_source":      "DAILY_OHLC",
+        }
+
+    if signal == "PUT":
+        worst_move = high_p - open_p
+        best_move  = open_p - low_p
+    else:
+        worst_move = open_p - low_p
+        best_move  = high_p - open_p
+
+    worst_prem = entry_prem - worst_move * _ATM_DELTA
+    best_prem  = entry_prem + best_move  * _ATM_DELTA
+
+    sl_hit     = bool(sl_prem  and worst_prem <= sl_prem)
+    t1_reached = bool(t1_prem  and best_prem  >= t1_prem)
+    t2_reached = bool(t2_prem  and best_prem  >= t2_prem)
+
+    path_ambiguous = bool(sl_hit and (t1_reached or t2_reached) and not was_correct)
+
+    outcome = (
+        "OUTCOME_UNKNOWN" if path_ambiguous else
+        "TARGET_2_HIT"    if t2_reached and was_correct else
+        "TARGET_1_HIT"    if t1_reached and was_correct else
+        "SL_HIT"          if sl_hit else
+        "DIRECTION_RIGHT" if was_correct else
+        "DIRECTION_WRONG"
+    )
+
+    return {
+        "outcome":          outcome,
+        "sl_hit":           sl_hit,
+        "target_1_reached": t1_reached,
+        "target_2_reached": t2_reached,
+        "path_ambiguous":   path_ambiguous,
+        "path_note": (
+            "OHLC-only tracking: both SL and target triggered via day H/L extremes "
+            "— intraday sequence unknown. Intraday tick data needed to confirm outcome."
+            if path_ambiguous else None
+        ),
+        "data_source": "DAILY_OHLC",
+    }

@@ -20,6 +20,7 @@ from src.analyzers.evaluation import (
     check_entry_trigger_met,
     audit_predictions_vs_triggers,
 )
+from src.fetchers.data_availability import check_data_availability
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -598,53 +599,114 @@ mc[6].metric("FII NET (Cr)",
 st.markdown("---")
 
 # ---------------------------------------------------------------------------
-# DATA QUALITY AUDIT — shows which layers had valid data, what is missing
+# DATA AVAILABILITY — comprehensive layer status + quality warnings
 # ---------------------------------------------------------------------------
 
-_dq = derive_data_quality(meta, ctx)
+_dq       = derive_data_quality(meta, ctx)
+_da       = check_data_availability(meta)
+_da_layers = _da["layers"]
 
-if _dq["flags"]:
-    st.markdown(_section_header("DATA QUALITY AUDIT"), unsafe_allow_html=True)
+st.markdown(_section_header("DATA AVAILABILITY"), unsafe_allow_html=True)
 
-    _dq_cols = st.columns(2)
-    with _dq_cols[0]:
-        _avail_items = "".join(
-            f'<div style="font-size:13px;font-family:monospace;padding:3px 0;color:{C["success"]}">✓ {lbl}</div>'
-            for lbl in ["Global Cues (yfinance)", "Technical Indicators (EMA/RSI/MACD)", "Option Chain (PCR/OI)", "News Headlines"]
-        )
-        st.markdown(
-            f'<div style="font-size:12px;color:{C["success"]};font-family:monospace;letter-spacing:1px;margin-bottom:4px">DATA AVAILABLE</div>'
-            + _avail_items,
-            unsafe_allow_html=True,
-        )
-    with _dq_cols[1]:
-        _missing_items = "".join(
-            f'<div style="font-size:13px;font-family:monospace;padding:3px 0;color:{C["red"]}">✗ {lyr}</div>'
-            for lyr in _dq["missing_layers"]
-        ) if _dq["missing_layers"] else f'<div style="color:{C["success"]};font-family:monospace;font-size:13px">None</div>'
-        st.markdown(
-            f'<div style="font-size:12px;color:{C["red"]};font-family:monospace;letter-spacing:1px;margin-bottom:4px">MISSING / UNRELIABLE</div>'
-            + _missing_items,
-            unsafe_allow_html=True,
-        )
+# Availability status table
+_ok_layers   = [l for l in _da_layers if l["available"]]
+_miss_layers = [l for l in _da_layers if not l["available"]]
 
+_da_c1, _da_c2 = st.columns(2)
+with _da_c1:
+    _ok_html = "".join(
+        f'<div style="display:flex;justify-content:space-between;font-size:12px;'
+        f'font-family:monospace;padding:3px 0;color:{C["success"]}">'
+        f'<span>✓ {l["name"]}</span>'
+        f'<span style="color:{C["neutral"]};font-size:11px">{l["weight"].split("(")[0].strip()}</span>'
+        f'</div>'
+        for l in _ok_layers
+    ) or f'<div style="color:{C["red"]};font-family:monospace;font-size:12px">None</div>'
+    st.markdown(
+        f'<div style="font-size:11px;color:{C["success"]};font-family:monospace;'
+        f'letter-spacing:1px;margin-bottom:4px">AVAILABLE ({len(_ok_layers)})</div>'
+        f'<div style="background:#0a100a;border:1px solid {C["border"]};'
+        f'padding:8px 10px;border-radius:3px">{_ok_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+with _da_c2:
+    _miss_html = "".join(
+        f'<div style="font-size:12px;font-family:monospace;padding:3px 0">'
+        f'<span style="color:{"#ff9800" if l["required"] else C["neutral"]}">{"✗" if l["required"] else "—"} {l["name"]}</span>'
+        f'<div style="font-size:11px;color:{C["text2"]};line-height:1.4;margin:1px 0 4px 12px">'
+        f'{l["what_breaks"][:90]}{"..." if len(l["what_breaks"]) > 90 else ""}</div>'
+        f'</div>'
+        for l in _miss_layers
+    ) or f'<div style="color:{C["success"]};font-family:monospace;font-size:12px">All layers available</div>'
+    _miss_label_color = C["red"] if _da["missing_required"] else C["neutral"]
+    st.markdown(
+        f'<div style="font-size:11px;color:{_miss_label_color};font-family:monospace;'
+        f'letter-spacing:1px;margin-bottom:4px">MISSING / UNAVAILABLE ({len(_miss_layers)})</div>'
+        f'<div style="background:#0a100a;border:1px solid {C["border"]};'
+        f'padding:8px 10px;border-radius:3px">{_miss_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+# Actionability banner
+if _da["actionable"]:
+    _action_banner_bg    = "#001500"
+    _action_banner_color = C["success"]
+    _action_banner_text  = "ANALYSIS ACTIONABLE — All required data layers present"
+else:
+    _action_banner_bg    = "#1a0800"
+    _action_banner_color = C["amber"]
+    _action_banner_text  = (
+        f"ANALYSIS DEGRADED — {len(_da['missing_required'])} required layer(s) missing: "
+        + ", ".join(_da["missing_required"])
+    )
+st.markdown(
+    f'<div style="background:{_action_banner_bg};border-left:3px solid {_action_banner_color};'
+    f'padding:10px 14px;font-family:monospace;font-size:13px;color:#ffffff;margin:8px 0">'
+    f'<span style="color:{_action_banner_color};font-weight:700">[STATUS] </span>'
+    f'{_action_banner_text}</div>',
+    unsafe_allow_html=True,
+)
+
+# Intraday data banner
+_id_color = C["success"] if _da["intraday_available"] else C["amber"]
+_id_text  = (
+    f'Intraday candles available for: {", ".join(_da["intraday_symbols"])} '
+    f'→ outcome resolution will use fill sequence (not OHLC extremes)'
+    if _da["intraday_available"] else
+    "Intraday data missing: cannot confirm whether SL or target hit first. "
+    "Ambiguous outcomes marked OUTCOME_UNKNOWN — not counted in win rate. "
+    f"Provider: {_da['intraday_provider']}"
+)
+st.markdown(
+    f'<div style="background:#{"001020" if _da["intraday_available"] else "120800"};'
+    f'border-left:3px solid {_id_color};'
+    f'padding:10px 14px;font-family:monospace;font-size:13px;color:#ffffff;margin:4px 0">'
+    f'<span style="color:{_id_color};font-weight:700">[INTRADAY] </span>{_id_text}</div>',
+    unsafe_allow_html=True,
+)
+
+# Data quality warnings (PCR contrarian, missing FII/DII, etc.)
+if _dq["warnings"]:
     for _w in _dq["warnings"]:
-        _w_color = C["amber"] if "PCR" in _w else C["red"]
+        _w_color = C["amber"] if "PCR" in _w or "contrarian" in _w.lower() else C["red"]
         st.markdown(
             f'<div style="background:#180e00;border-left:3px solid {_w_color};'
-            f'padding:10px 14px;font-family:monospace;font-size:13px;line-height:1.7;'
+            f'padding:8px 14px;font-family:monospace;font-size:12px;line-height:1.6;'
             f'color:#ffffff;margin:3px 0">'
-            f'<span style="color:{_w_color};font-weight:700">[DATA WARN] </span>{_w}</div>',
+            f'<span style="color:{_w_color};font-weight:700">[WARN] </span>{_w}</div>',
             unsafe_allow_html=True,
         )
 
+if _dq["penalty_note"] and _dq["missing_layers"]:
     st.markdown(
         f'<div style="background:{C["card"]};border:1px solid {C["border"]};'
-        f'padding:10px 14px;font-family:monospace;font-size:13px;color:{C["amber"]};margin-top:6px">'
+        f'padding:8px 14px;font-family:monospace;font-size:12px;color:{C["amber"]};margin-top:4px">'
         f'{_dq["penalty_note"]}</div>',
         unsafe_allow_html=True,
     )
-    st.markdown("---")
+
+st.markdown("---")
 
 # ---------------------------------------------------------------------------
 # GLOBAL INTELLIGENCE — FIX 8: 80px cards, 20px value, 18px % change, border
@@ -1373,16 +1435,27 @@ else:
         )
 
     # Ambiguity warnings in accuracy log
-    _ambiguous = [r for r in valid_log if r.get("path_ambiguous") or r.get("path_note")]
+    _ambiguous    = [r for r in valid_log if r.get("outcome") == "OUTCOME_UNKNOWN"]
+    _intraday_src = [r for r in valid_log if r.get("data_source") == "INTRADAY"]
     if _ambiguous:
         st.markdown(
             f'<div style="background:#1a0f00;border-left:3px solid {C["amber"]};'
             f'padding:10px 14px;font-family:monospace;font-size:13px;line-height:1.7;'
             f'color:#ffffff;margin-top:6px">'
             f'<span style="color:{C["amber"]};font-weight:700">[OUTCOME AUDIT] </span>'
-            f'{len(_ambiguous)} trade(s) had both SL and target triggered via OHLC H/L extremes. '
-            f'Intraday sequence is unknown — outcomes marked SL_HIT (conservative). '
-            f'Intraday tick data is needed to confirm actual fill sequence.</div>',
+            f'{len(_ambiguous)} trade(s) marked OUTCOME_UNKNOWN: both SL and target triggered via '
+            f'daily OHLC H/L extremes — intraday fill sequence cannot be confirmed. '
+            f'These are excluded from win rate. '
+            f'Fix: provide 5m CSV files in data/intraday/ (see docs/data_requirements.md).</div>',
+            unsafe_allow_html=True,
+        )
+    if _intraday_src:
+        st.markdown(
+            f'<div style="background:#001500;border-left:3px solid {C["success"]};'
+            f'padding:8px 14px;font-family:monospace;font-size:12px;color:#ffffff;margin-top:4px">'
+            f'<span style="color:{C["success"]};font-weight:700">[INTRADAY CONFIRMED] </span>'
+            f'{len(_intraday_src)} trade outcome(s) resolved from intraday candle sequence '
+            f'(fill order confirmed — not from OHLC extremes).</div>',
             unsafe_allow_html=True,
         )
 

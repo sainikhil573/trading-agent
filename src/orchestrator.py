@@ -19,8 +19,9 @@ from src.fetchers.technical_fetcher import fetch_index_technicals, fetch_stock_t
 from src.fetchers.news_fetcher      import fetch_market_headlines
 from src.analyzers.signal_analyzer  import build_market_signal, build_stock_signals
 from src.analyzers.claude_analyzer  import ClaudeAnalyzer
-from src.analyzers.evaluation       import derive_data_quality
+from src.analyzers.evaluation       import derive_data_quality, resolve_outcome_with_intraday
 from src.analyzers.trade_gates      import apply_trade_gates
+from src.fetchers.intraday_provider import get_default_provider
 
 # Fixed 20-stock F&O universe for daily signal generation
 FNO_UNIVERSE = [
@@ -399,6 +400,12 @@ def run_postmarket_tracker() -> dict:
         logger.info("No recommended trades in morning brief — skipping tracker")
         return {}
 
+    intraday_provider = get_default_provider()
+    if intraday_provider.is_available():
+        logger.info("Intraday provider: %s", intraday_provider.name)
+    else:
+        logger.info("No intraday data source — ambiguous outcomes will be OUTCOME_UNKNOWN")
+
     results = []
     for trade in trades:
         sym            = trade.get("symbol", "")
@@ -446,23 +453,23 @@ def run_postmarket_tracker() -> dict:
                 -day_chg_pts if signal == "PUT" else day_chg_pts
             ) * _ATM_DELTA, 2) if entry_premium else None
 
-            sl_hit       = bool(worst_premium and sl_premium and worst_premium <= sl_premium)
-            t1_reached   = bool(best_premium  and t1_premium  and best_premium  >= t1_premium)
-            t2_reached   = bool(best_premium  and t2_premium  and best_premium  >= t2_premium)
-
-            # When both SL and target are touched via OHLC H/L extremes and direction
-            # is wrong, the intraday sequence is unknown — we cannot confirm which was
-            # hit first. Mark as OUTCOME_UNKNOWN rather than crediting either outcome.
-            # T1/T2 are only credited when direction was correct (unambiguous win).
-            path_ambiguous = bool(sl_hit and (t1_reached or t2_reached) and not was_correct)
-            outcome = (
-                "OUTCOME_UNKNOWN"  if path_ambiguous else
-                "TARGET_2_HIT"     if t2_reached and was_correct else
-                "TARGET_1_HIT"     if t1_reached and was_correct else
-                "SL_HIT"           if sl_hit else
-                "DIRECTION_RIGHT"  if was_correct else
-                "DIRECTION_WRONG"
+            # Use evaluation module to resolve outcome.
+            # If intraday candles exist, the chronological SL vs target sequence
+            # is used. Otherwise falls back to daily OHLC (marks ambiguous cases
+            # as OUTCOME_UNKNOWN — never credits a false win).
+            _daily_ctx = {"open_p": open_p, "high_p": high_p, "low_p": low_p,
+                          "was_correct": was_correct}
+            _candles   = intraday_provider.get_candles(sym, date.today())
+            _resolved  = resolve_outcome_with_intraday(
+                trade, _daily_ctx,
+                _candles if not _candles.empty else None,
             )
+            sl_hit         = _resolved["sl_hit"]
+            t1_reached     = _resolved["target_1_reached"]
+            t2_reached     = _resolved["target_2_reached"]
+            path_ambiguous = _resolved["path_ambiguous"]
+            outcome        = _resolved["outcome"]
+            data_source    = _resolved["data_source"]
 
             results.append({
                 "symbol":            sym,
@@ -489,11 +496,8 @@ def run_postmarket_tracker() -> dict:
                 "target_1_reached":    t1_reached,
                 "target_2_reached":    t2_reached,
                 "path_ambiguous":      path_ambiguous,
-                "path_note": (
-                    "OHLC-only tracking: both SL and target triggered via day H/L extremes "
-                    "— intraday sequence unknown. Intraday tick data needed to confirm outcome."
-                    if path_ambiguous else None
-                ),
+                "path_note":           _resolved.get("path_note"),
+                "data_source":         data_source,
                 "note":                "Premium estimates use ATM delta=0.5 approximation",
             })
 
