@@ -438,11 +438,16 @@ def run_postmarket_tracker() -> dict:
             t1_reached   = bool(best_premium  and t1_premium  and best_premium  >= t1_premium)
             t2_reached   = bool(best_premium  and t2_premium  and best_premium  >= t2_premium)
 
+            # T1/T2 only credited when overall direction was correct.
+            # When direction is wrong, OHLC extremes can show T1 "reached" via a
+            # temporary intraday bounce — but the adverse move likely hit SL first.
+            # Conservative rule: SL_HIT takes priority over T1 on directionally wrong calls.
+            path_ambiguous = bool(sl_hit and (t1_reached or t2_reached) and not was_correct)
             outcome = (
-                "TARGET_2_HIT"    if t2_reached  else
-                "TARGET_1_HIT"    if t1_reached  else
-                "SL_HIT"          if sl_hit       else
-                "DIRECTION_RIGHT" if was_correct  else
+                "TARGET_2_HIT"    if t2_reached and was_correct else
+                "TARGET_1_HIT"    if t1_reached and was_correct else
+                "SL_HIT"          if sl_hit else
+                "DIRECTION_RIGHT" if was_correct else
                 "DIRECTION_WRONG"
             )
 
@@ -470,6 +475,12 @@ def run_postmarket_tracker() -> dict:
                 "sl_hit":              sl_hit,
                 "target_1_reached":    t1_reached,
                 "target_2_reached":    t2_reached,
+                "path_ambiguous":      path_ambiguous,
+                "path_note": (
+                    "OHLC-only tracking: SL and target both triggered via day H/L extremes "
+                    "— intraday sequence unknown; SL_HIT assumed (direction was wrong)"
+                    if path_ambiguous else None
+                ),
                 "note":                "Premium estimates use ATM delta=0.5 approximation",
             })
 

@@ -14,6 +14,13 @@ import plotly.graph_objects as go
 import pytz
 import streamlit as st
 
+from src.analyzers.evaluation import (
+    derive_data_quality,
+    evaluate_accuracy_log as _eval_log,
+    check_entry_trigger_met,
+    audit_predictions_vs_triggers,
+)
+
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
@@ -591,6 +598,55 @@ mc[6].metric("FII NET (Cr)",
 st.markdown("---")
 
 # ---------------------------------------------------------------------------
+# DATA QUALITY AUDIT — shows which layers had valid data, what is missing
+# ---------------------------------------------------------------------------
+
+_dq = derive_data_quality(meta, ctx)
+
+if _dq["flags"]:
+    st.markdown(_section_header("DATA QUALITY AUDIT"), unsafe_allow_html=True)
+
+    _dq_cols = st.columns(2)
+    with _dq_cols[0]:
+        _avail_items = "".join(
+            f'<div style="font-size:13px;font-family:monospace;padding:3px 0;color:{C["success"]}">✓ {lbl}</div>'
+            for lbl in ["Global Cues (yfinance)", "Technical Indicators (EMA/RSI/MACD)", "Option Chain (PCR/OI)", "News Headlines"]
+        )
+        st.markdown(
+            f'<div style="font-size:12px;color:{C["success"]};font-family:monospace;letter-spacing:1px;margin-bottom:4px">DATA AVAILABLE</div>'
+            + _avail_items,
+            unsafe_allow_html=True,
+        )
+    with _dq_cols[1]:
+        _missing_items = "".join(
+            f'<div style="font-size:13px;font-family:monospace;padding:3px 0;color:{C["red"]}">✗ {lyr}</div>'
+            for lyr in _dq["missing_layers"]
+        ) if _dq["missing_layers"] else f'<div style="color:{C["success"]};font-family:monospace;font-size:13px">None</div>'
+        st.markdown(
+            f'<div style="font-size:12px;color:{C["red"]};font-family:monospace;letter-spacing:1px;margin-bottom:4px">MISSING / UNRELIABLE</div>'
+            + _missing_items,
+            unsafe_allow_html=True,
+        )
+
+    for _w in _dq["warnings"]:
+        _w_color = C["amber"] if "PCR" in _w else C["red"]
+        st.markdown(
+            f'<div style="background:#180e00;border-left:3px solid {_w_color};'
+            f'padding:10px 14px;font-family:monospace;font-size:13px;line-height:1.7;'
+            f'color:#ffffff;margin:3px 0">'
+            f'<span style="color:{_w_color};font-weight:700">[DATA WARN] </span>{_w}</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        f'<div style="background:{C["card"]};border:1px solid {C["border"]};'
+        f'padding:10px 14px;font-family:monospace;font-size:13px;color:{C["amber"]};margin-top:6px">'
+        f'{_dq["penalty_note"]}</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("---")
+
+# ---------------------------------------------------------------------------
 # GLOBAL INTELLIGENCE — FIX 8: 80px cards, 20px value, 18px % change, border
 # ---------------------------------------------------------------------------
 
@@ -730,6 +786,37 @@ else:
             # FIX 4 — 12px bars, 13px labels (via _conf_bar)
             st.markdown(
                 f'<div>{"".join(_conf_bar(k,v) for k,v in bd.items())}</div>',
+                unsafe_allow_html=True,
+            )
+            # Evidence checklist: which layers had valid data
+            _e_rows = []
+            _fii = meta.get("fii_dii", {})
+            _fii_ok = not (_fii.get("fii_net_buy") == 0 and _fii.get("dii_net_buy") == 0)
+            _poi_ok = "unavailable" not in str(ctx.get("smart_money_direction", "")).lower()
+            _e_rows.append((
+                "FII/DII Cash Flow",
+                C["success"] if _fii_ok else C["red"],
+                "Available" if _fii_ok else "ZERO — may be missing",
+            ))
+            _e_rows.append((
+                "Participant Derivatives OI",
+                C["success"] if _poi_ok else C["red"],
+                "Available" if _poi_ok else "UNAVAILABLE",
+            ))
+            _e_rows.append(("Global Cues (yfinance)", C["success"], "Available"))
+            _e_rows.append(("Technical Indicators",   C["success"], "Available"))
+            _e_rows.append(("Option Chain PCR / OI",  C["success"], "Available"))
+            _ev_html = "".join(
+                f'<div style="display:flex;justify-content:space-between;font-size:12px;'
+                f'font-family:monospace;padding:2px 0;color:{col}">'
+                f'<span>{lbl}</span><span style="font-weight:700">{status}</span></div>'
+                for lbl, col, status in _e_rows
+            )
+            st.markdown(
+                f'<div style="font-size:12px;color:{C["neutral"]};letter-spacing:1px;'
+                f'font-family:monospace;margin:10px 0 4px 0">EVIDENCE CHECKLIST</div>'
+                + f'<div style="background:#0a100a;border:1px solid {C["border"]};'
+                f'padding:8px 10px;border-radius:3px">{_ev_html}</div>',
                 unsafe_allow_html=True,
             )
 
@@ -1185,10 +1272,53 @@ else:
                   "sl_hit","target_1_reached","target_2_reached"]
         if "claude_grade" in df_log.columns:
             cols.append("claude_grade")
+        if "path_note" in df_log.columns:
+            cols.append("path_note")
         st.dataframe(
             df_log[[c for c in cols if c in df_log.columns]].sort_values("date", ascending=False),
             use_container_width=True,
         )
+
+    # Ambiguity warnings in accuracy log
+    _ambiguous = [r for r in valid_log if r.get("path_ambiguous") or r.get("path_note")]
+    if _ambiguous:
+        st.markdown(
+            f'<div style="background:#1a0f00;border-left:3px solid {C["amber"]};'
+            f'padding:10px 14px;font-family:monospace;font-size:13px;line-height:1.7;'
+            f'color:#ffffff;margin-top:6px">'
+            f'<span style="color:{C["amber"]};font-weight:700">[OUTCOME AUDIT] </span>'
+            f'{len(_ambiguous)} trade(s) had both SL and target triggered via OHLC H/L extremes. '
+            f'Intraday sequence is unknown — outcomes marked SL_HIT (conservative). '
+            f'Intraday tick data is needed to confirm actual fill sequence.</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Entry trigger feasibility check for historical trades
+    _trigger_audits = []
+    for _r in valid_log:
+        _trade_ref = next(
+            (t for t in trades_all if t.get("symbol") == _r.get("symbol")), None
+        )
+        if _trade_ref and _r.get("index_open"):
+            _tc = check_entry_trigger_met(_trade_ref, _r.get("index_open"))
+            if _tc["met"] is not None:
+                _trigger_audits.append({
+                    "symbol": _r["symbol"],
+                    "date":   _r["date"],
+                    "check":  _tc,
+                    "was_correct": _r.get("was_correct"),
+                })
+    if _trigger_audits:
+        with st.expander("[TRIGGER AUDIT] Entry trigger feasibility check"):
+            for _ta in _trigger_audits:
+                _tc_col = C["success"] if _ta["check"]["met"] else C["red"]
+                st.markdown(
+                    f'<div style="font-size:13px;font-family:monospace;padding:3px 0;color:{_tc_col}">'
+                    f'{_ta["symbol"]} ({_ta["date"]}): {_ta["check"]["reason"]}'
+                    + (f' | Direction was {"CORRECT" if _ta["was_correct"] else "WRONG"}' if _ta["was_correct"] is not None else "")
+                    + f'</div>',
+                    unsafe_allow_html=True,
+                )
 
 # ---------------------------------------------------------------------------
 # MORNING SUMMARY
