@@ -19,6 +19,9 @@ from src.fetchers.technical_fetcher import fetch_index_technicals, fetch_stock_t
 from src.fetchers.news_fetcher      import fetch_market_headlines
 from src.analyzers.signal_analyzer  import build_market_signal, build_stock_signals
 from src.analyzers.claude_analyzer  import ClaudeAnalyzer
+from src.analyzers.evaluation       import derive_data_quality, resolve_outcome_with_intraday
+from src.analyzers.trade_gates      import apply_trade_gates
+from src.fetchers.intraday_provider import get_default_provider
 
 # Fixed 20-stock F&O universe for daily signal generation
 FNO_UNIVERSE = [
@@ -165,6 +168,16 @@ def run_morning_analysis(api_key: str) -> dict:
         },
         "fii_dii":          fii_dii,
     }
+
+    # Apply deterministic trade gates (post-process Claude's output)
+    data_quality = derive_data_quality(brief["_meta"], brief.get("market_context", {}))
+    brief = apply_trade_gates(brief, data_quality, nifty_signal, banknifty_signal)
+
+    gs = brief.get("_gate_summary", {})
+    logger.info(
+        "Trade gates applied: %d allowed, %d blocked (data_penalty=%.1f)",
+        gs.get("allowed", 0), gs.get("blocked", 0), gs.get("data_penalty", 0),
+    )
 
     out_path = OUT_DIR / f"trade_brief_morning_{today}.json"
     _save(brief, out_path)
@@ -387,6 +400,12 @@ def run_postmarket_tracker() -> dict:
         logger.info("No recommended trades in morning brief — skipping tracker")
         return {}
 
+    intraday_provider = get_default_provider()
+    if intraday_provider.is_available():
+        logger.info("Intraday provider: %s", intraday_provider.name)
+    else:
+        logger.info("No intraday data source — ambiguous outcomes will be OUTCOME_UNKNOWN")
+
     results = []
     for trade in trades:
         sym            = trade.get("symbol", "")
@@ -434,17 +453,23 @@ def run_postmarket_tracker() -> dict:
                 -day_chg_pts if signal == "PUT" else day_chg_pts
             ) * _ATM_DELTA, 2) if entry_premium else None
 
-            sl_hit       = bool(worst_premium and sl_premium and worst_premium <= sl_premium)
-            t1_reached   = bool(best_premium  and t1_premium  and best_premium  >= t1_premium)
-            t2_reached   = bool(best_premium  and t2_premium  and best_premium  >= t2_premium)
-
-            outcome = (
-                "TARGET_2_HIT"    if t2_reached  else
-                "TARGET_1_HIT"    if t1_reached  else
-                "SL_HIT"          if sl_hit       else
-                "DIRECTION_RIGHT" if was_correct  else
-                "DIRECTION_WRONG"
+            # Use evaluation module to resolve outcome.
+            # If intraday candles exist, the chronological SL vs target sequence
+            # is used. Otherwise falls back to daily OHLC (marks ambiguous cases
+            # as OUTCOME_UNKNOWN — never credits a false win).
+            _daily_ctx = {"open_p": open_p, "high_p": high_p, "low_p": low_p,
+                          "was_correct": was_correct}
+            _candles   = intraday_provider.get_candles(sym, date.today())
+            _resolved  = resolve_outcome_with_intraday(
+                trade, _daily_ctx,
+                _candles if not _candles.empty else None,
             )
+            sl_hit         = _resolved["sl_hit"]
+            t1_reached     = _resolved["target_1_reached"]
+            t2_reached     = _resolved["target_2_reached"]
+            path_ambiguous = _resolved["path_ambiguous"]
+            outcome        = _resolved["outcome"]
+            data_source    = _resolved["data_source"]
 
             results.append({
                 "symbol":            sym,
@@ -470,6 +495,9 @@ def run_postmarket_tracker() -> dict:
                 "sl_hit":              sl_hit,
                 "target_1_reached":    t1_reached,
                 "target_2_reached":    t2_reached,
+                "path_ambiguous":      path_ambiguous,
+                "path_note":           _resolved.get("path_note"),
+                "data_source":         data_source,
                 "note":                "Premium estimates use ATM delta=0.5 approximation",
             })
 
@@ -636,6 +664,7 @@ def _print_postmarket_summary(
         "SL_HIT":          "[SL]",
         "DIRECTION_RIGHT": "[OK]",
         "DIRECTION_WRONG": "[XX]",
+        "OUTCOME_UNKNOWN": "[??]",
     }
 
     for r in results:
@@ -660,14 +689,17 @@ def _print_postmarket_summary(
     valid = [r for r in full_log if not r.get("error")]
     if valid:
         correct  = sum(1 for r in valid if r.get("was_correct"))
-        t1_hits  = sum(1 for r in valid if r.get("target_1_reached"))
-        t2_hits  = sum(1 for r in valid if r.get("target_2_reached"))
-        sl_hits  = sum(1 for r in valid if r.get("sl_hit"))
+        t1_hits  = sum(1 for r in valid if r.get("outcome") == "TARGET_1_HIT")
+        t2_hits  = sum(1 for r in valid if r.get("outcome") == "TARGET_2_HIT")
+        sl_hits  = sum(1 for r in valid if r.get("outcome") == "SL_HIT")
+        unknown  = sum(1 for r in valid if r.get("outcome") == "OUTCOME_UNKNOWN")
         total    = len(valid)
         print(f"\n  --- ROLLING ACCURACY ({total} trades tracked) ---")
         print(f"  Direction correct : {correct}/{total}  ({correct/total*100:.1f}%)")
         print(f"  Target 1 hit      : {t1_hits}/{total}  ({t1_hits/total*100:.1f}%)")
         print(f"  Target 2 hit      : {t2_hits}/{total}  ({t2_hits/total*100:.1f}%)")
         print(f"  SL hit            : {sl_hits}/{total}  ({sl_hits/total*100:.1f}%)")
+        if unknown:
+            print(f"  OUTCOME_UNKNOWN   : {unknown}/{total}  (intraday sequence unavailable — not counted)")
 
     print(f"\n{sep}\n")

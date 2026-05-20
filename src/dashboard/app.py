@@ -14,6 +14,14 @@ import plotly.graph_objects as go
 import pytz
 import streamlit as st
 
+from src.analyzers.evaluation import (
+    derive_data_quality,
+    evaluate_accuracy_log as _eval_log,
+    check_entry_trigger_met,
+    audit_predictions_vs_triggers,
+)
+from src.fetchers.data_availability import check_data_availability
+
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
@@ -591,6 +599,116 @@ mc[6].metric("FII NET (Cr)",
 st.markdown("---")
 
 # ---------------------------------------------------------------------------
+# DATA AVAILABILITY — comprehensive layer status + quality warnings
+# ---------------------------------------------------------------------------
+
+_dq       = derive_data_quality(meta, ctx)
+_da       = check_data_availability(meta)
+_da_layers = _da["layers"]
+
+st.markdown(_section_header("DATA AVAILABILITY"), unsafe_allow_html=True)
+
+# Availability status table
+_ok_layers   = [l for l in _da_layers if l["available"]]
+_miss_layers = [l for l in _da_layers if not l["available"]]
+
+_da_c1, _da_c2 = st.columns(2)
+with _da_c1:
+    _ok_html = "".join(
+        f'<div style="display:flex;justify-content:space-between;font-size:12px;'
+        f'font-family:monospace;padding:3px 0;color:{C["success"]}">'
+        f'<span>✓ {l["name"]}</span>'
+        f'<span style="color:{C["neutral"]};font-size:11px">{l["weight"].split("(")[0].strip()}</span>'
+        f'</div>'
+        for l in _ok_layers
+    ) or f'<div style="color:{C["red"]};font-family:monospace;font-size:12px">None</div>'
+    st.markdown(
+        f'<div style="font-size:11px;color:{C["success"]};font-family:monospace;'
+        f'letter-spacing:1px;margin-bottom:4px">AVAILABLE ({len(_ok_layers)})</div>'
+        f'<div style="background:#0a100a;border:1px solid {C["border"]};'
+        f'padding:8px 10px;border-radius:3px">{_ok_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+with _da_c2:
+    _miss_html = "".join(
+        f'<div style="font-size:12px;font-family:monospace;padding:3px 0">'
+        f'<span style="color:{"#ff9800" if l["required"] else C["neutral"]}">{"✗" if l["required"] else "—"} {l["name"]}</span>'
+        f'<div style="font-size:11px;color:{C["text2"]};line-height:1.4;margin:1px 0 4px 12px">'
+        f'{l["what_breaks"][:90]}{"..." if len(l["what_breaks"]) > 90 else ""}</div>'
+        f'</div>'
+        for l in _miss_layers
+    ) or f'<div style="color:{C["success"]};font-family:monospace;font-size:12px">All layers available</div>'
+    _miss_label_color = C["red"] if _da["missing_required"] else C["neutral"]
+    st.markdown(
+        f'<div style="font-size:11px;color:{_miss_label_color};font-family:monospace;'
+        f'letter-spacing:1px;margin-bottom:4px">MISSING / UNAVAILABLE ({len(_miss_layers)})</div>'
+        f'<div style="background:#0a100a;border:1px solid {C["border"]};'
+        f'padding:8px 10px;border-radius:3px">{_miss_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+# Actionability banner
+if _da["actionable"]:
+    _action_banner_bg    = "#001500"
+    _action_banner_color = C["success"]
+    _action_banner_text  = "ANALYSIS ACTIONABLE — All required data layers present"
+else:
+    _action_banner_bg    = "#1a0800"
+    _action_banner_color = C["amber"]
+    _action_banner_text  = (
+        f"ANALYSIS DEGRADED — {len(_da['missing_required'])} required layer(s) missing: "
+        + ", ".join(_da["missing_required"])
+    )
+st.markdown(
+    f'<div style="background:{_action_banner_bg};border-left:3px solid {_action_banner_color};'
+    f'padding:10px 14px;font-family:monospace;font-size:13px;color:#ffffff;margin:8px 0">'
+    f'<span style="color:{_action_banner_color};font-weight:700">[STATUS] </span>'
+    f'{_action_banner_text}</div>',
+    unsafe_allow_html=True,
+)
+
+# Intraday data banner
+_id_color = C["success"] if _da["intraday_available"] else C["amber"]
+_id_text  = (
+    f'Intraday candles available for: {", ".join(_da["intraday_symbols"])} '
+    f'→ outcome resolution will use fill sequence (not OHLC extremes)'
+    if _da["intraday_available"] else
+    "Intraday data missing: cannot confirm whether SL or target hit first. "
+    "Ambiguous outcomes marked OUTCOME_UNKNOWN — not counted in win rate. "
+    f"Provider: {_da['intraday_provider']}"
+)
+st.markdown(
+    f'<div style="background:#{"001020" if _da["intraday_available"] else "120800"};'
+    f'border-left:3px solid {_id_color};'
+    f'padding:10px 14px;font-family:monospace;font-size:13px;color:#ffffff;margin:4px 0">'
+    f'<span style="color:{_id_color};font-weight:700">[INTRADAY] </span>{_id_text}</div>',
+    unsafe_allow_html=True,
+)
+
+# Data quality warnings (PCR contrarian, missing FII/DII, etc.)
+if _dq["warnings"]:
+    for _w in _dq["warnings"]:
+        _w_color = C["amber"] if "PCR" in _w or "contrarian" in _w.lower() else C["red"]
+        st.markdown(
+            f'<div style="background:#180e00;border-left:3px solid {_w_color};'
+            f'padding:8px 14px;font-family:monospace;font-size:12px;line-height:1.6;'
+            f'color:#ffffff;margin:3px 0">'
+            f'<span style="color:{_w_color};font-weight:700">[WARN] </span>{_w}</div>',
+            unsafe_allow_html=True,
+        )
+
+if _dq["penalty_note"] and _dq["missing_layers"]:
+    st.markdown(
+        f'<div style="background:{C["card"]};border:1px solid {C["border"]};'
+        f'padding:8px 14px;font-family:monospace;font-size:12px;color:{C["amber"]};margin-top:4px">'
+        f'{_dq["penalty_note"]}</div>',
+        unsafe_allow_html=True,
+    )
+
+st.markdown("---")
+
+# ---------------------------------------------------------------------------
 # GLOBAL INTELLIGENCE — FIX 8: 80px cards, 20px value, 18px % change, border
 # ---------------------------------------------------------------------------
 
@@ -663,6 +781,19 @@ else:
         rec_high    = "HIGH" in str(rec_risk).upper()
         expiry_warn = t.get("expiry_day_warning", False)
 
+        # Gate fields (present on new briefs; backward compat on old ones)
+        gate_status  = t.get("gate_status", "TRADE_ALLOWED")
+        gate_eff     = t.get("gate_effective_confidence")
+        gate_orig    = t.get("gate_original_confidence", conf)
+        gate_penalty = t.get("gate_data_penalty", 0)
+        gate_cap     = t.get("gate_confidence_cap")
+        GATE_COLORS  = {
+            "TRADE_ALLOWED":     C["success"],
+            "NO_TRADE":          C["amber"],
+            "DATA_INSUFFICIENT": C["red"],
+            "CONFLICTING_SIGNALS": C["red"],
+        }
+
         # FIX 4 — 4px solid left border (red for PUT, green for CALL)
         st.markdown(
             f'<div style="background:{C["card"]};border:1px solid {sig_c}44;'
@@ -673,6 +804,10 @@ else:
 
         hc1, hc2, hc3 = st.columns([4, 2, 1])
         with hc1:
+            gate_badge = (
+                _badge(gate_status, GATE_COLORS.get(gate_status, C["neutral"]), 12)
+                if gate_status != "TRADE_ALLOWED" else ""
+            )
             # FIX 2 — symbol at 28px bold
             st.markdown(
                 f'<div style="font-size:32px;font-weight:bold;font-family:monospace;'
@@ -680,14 +815,24 @@ else:
                 + _badge(sig, sig_c, 13)
                 + _badge(f"STRIKE {t.get('strike','?')}", "#1a2e1a", 13)
                 + _badge(t.get("expiry","?"), "#8b0000" if expiry_warn else "#1a2e1a", 13)
-                + (" " + _badge("EXPIRY TODAY", C["red"], 13) if expiry_warn else ""),
+                + (" " + _badge("EXPIRY TODAY", C["red"], 13) if expiry_warn else "")
+                + (" " + gate_badge if gate_badge else ""),
                 unsafe_allow_html=True,
             )
         with hc2:
+            cap_note = (
+                f'<div style="font-size:11px;color:{C["amber"]};font-family:monospace;margin-top:4px">'
+                f'eff: {gate_eff:.1f} (cap: {gate_cap})</div>'
+                if gate_cap is not None and gate_eff is not None else (
+                    f'<div style="font-size:11px;color:{C["amber"]};font-family:monospace;margin-top:4px">'
+                    f'eff: {gate_eff:.1f} (-{gate_penalty:.1f})</div>'
+                    if gate_penalty and gate_eff is not None else ""
+                )
+            )
             st.markdown(
                 f'<div style="font-size:12px;color:{C["neutral"]};letter-spacing:1px;'
                 f'font-family:monospace;margin-bottom:4px">POSITION SIZE</div>'
-                + _badge(size, size_c, 13),
+                + _badge(size, size_c, 13) + cap_note,
                 unsafe_allow_html=True,
             )
         with hc3:
@@ -730,6 +875,37 @@ else:
             # FIX 4 — 12px bars, 13px labels (via _conf_bar)
             st.markdown(
                 f'<div>{"".join(_conf_bar(k,v) for k,v in bd.items())}</div>',
+                unsafe_allow_html=True,
+            )
+            # Evidence checklist: which layers had valid data
+            _e_rows = []
+            _fii = meta.get("fii_dii", {})
+            _fii_ok = not (_fii.get("fii_net_buy") == 0 and _fii.get("dii_net_buy") == 0)
+            _poi_ok = "unavailable" not in str(ctx.get("smart_money_direction", "")).lower()
+            _e_rows.append((
+                "FII/DII Cash Flow",
+                C["success"] if _fii_ok else C["red"],
+                "Available" if _fii_ok else "ZERO — may be missing",
+            ))
+            _e_rows.append((
+                "Participant Derivatives OI",
+                C["success"] if _poi_ok else C["red"],
+                "Available" if _poi_ok else "UNAVAILABLE",
+            ))
+            _e_rows.append(("Global Cues (yfinance)", C["success"], "Available"))
+            _e_rows.append(("Technical Indicators",   C["success"], "Available"))
+            _e_rows.append(("Option Chain PCR / OI",  C["success"], "Available"))
+            _ev_html = "".join(
+                f'<div style="display:flex;justify-content:space-between;font-size:12px;'
+                f'font-family:monospace;padding:2px 0;color:{col}">'
+                f'<span>{lbl}</span><span style="font-weight:700">{status}</span></div>'
+                for lbl, col, status in _e_rows
+            )
+            st.markdown(
+                f'<div style="font-size:12px;color:{C["neutral"]};letter-spacing:1px;'
+                f'font-family:monospace;margin:10px 0 4px 0">EVIDENCE CHECKLIST</div>'
+                + f'<div style="background:#0a100a;border:1px solid {C["border"]};'
+                f'padding:8px 10px;border-radius:3px">{_ev_html}</div>',
                 unsafe_allow_html=True,
             )
 
@@ -899,6 +1075,69 @@ if filtered:
                 unsafe_allow_html=True,
             )
             st.markdown(f'<hr style="border-color:{C["border"]};margin:6px 0">', unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# BLOCKED TRADES — gated out by deterministic validation rules
+# ---------------------------------------------------------------------------
+
+_gated_out = brief.get("trades_gated_out", [])
+_gate_summary = brief.get("_gate_summary", {})
+
+if _gated_out:
+    st.markdown(_section_header("BLOCKED TRADES — GATED OUT"), unsafe_allow_html=True)
+
+    _gs_allowed = _gate_summary.get("allowed", len(trades_all))
+    _gs_blocked = _gate_summary.get("blocked", len(_gated_out))
+    _gs_penalty = _gate_summary.get("data_penalty", 0)
+    st.markdown(
+        f'<div style="font-family:monospace;font-size:13px;color:{C["amber"]};margin-bottom:8px">'
+        f'{_gs_blocked} trade(s) blocked by validation gates before recommendation. '
+        f'Data quality penalty applied: {_gs_penalty:.1f} pts off confidence.</div>',
+        unsafe_allow_html=True,
+    )
+
+    _GATE_STATUS_COLORS = {
+        "CONFLICTING_SIGNALS": C["red"],
+        "DATA_INSUFFICIENT":   "#ff9800",
+        "NO_TRADE":            C["amber"],
+    }
+    for _gt in _gated_out:
+        _gs_color = _GATE_STATUS_COLORS.get(_gt.get("gate_status",""), C["neutral"])
+        _gs_sig   = _gt.get("signal","?")
+        _gs_sig_c = SIG_COLOR.get(_gs_sig, C["neutral"])
+        st.markdown(
+            f'<div style="background:{C["card"]};border:1px solid {_gs_color}44;'
+            f'border-left:4px solid {_gs_color};border-radius:4px;'
+            f'padding:14px 16px;margin:6px 0">',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            _badge(_gt.get("symbol","?"), "#1a2e1a", 13)
+            + _badge(_gs_sig, _gs_sig_c, 13)
+            + _badge(_gt.get("gate_status","?"), _gs_color, 13)
+            + f'<span style="font-size:12px;color:{C["text2"]};font-family:monospace;margin-left:8px">'
+            f'ORIGINAL CONF: {_gt.get("gate_original_confidence","?")} → '
+            f'EFF: {_gt.get("gate_effective_confidence","?")}</span>',
+            unsafe_allow_html=True,
+        )
+        _gr = _gt.get("gate_reason","")
+        if _gr:
+            st.markdown(
+                f'<div style="font-size:13px;color:{_gs_color};font-family:monospace;'
+                f'margin-top:6px;line-height:1.6">{_gr}</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+elif brief.get("_gates_applied") and not trades_all and not _gated_out:
+    st.markdown(
+        f'<div style="background:#180800;border-left:3px solid {C["amber"]};'
+        f'padding:12px 16px;font-family:monospace;font-size:14px;color:#ffffff;margin:4px 0">'
+        f'[GATES APPLIED] No trades passed validation. '
+        f'Gate summary: penalty={_gate_summary.get("data_penalty",0):.1f} pts | '
+        f'missing layers={_gate_summary.get("missing_layers",[])}</div>',
+        unsafe_allow_html=True,
+    )
 
 st.markdown("---")
 
@@ -1166,16 +1405,19 @@ if not valid_log:
 else:
     total   = len(valid_log)
     correct = sum(1 for r in valid_log if r.get("was_correct"))
-    t1      = sum(1 for r in valid_log if r.get("target_1_reached"))
-    t2      = sum(1 for r in valid_log if r.get("target_2_reached"))
-    sl      = sum(1 for r in valid_log if r.get("sl_hit"))
+    t1      = sum(1 for r in valid_log if r.get("outcome") == "TARGET_1_HIT")
+    t2      = sum(1 for r in valid_log if r.get("outcome") == "TARGET_2_HIT")
+    sl      = sum(1 for r in valid_log if r.get("outcome") == "SL_HIT")
+    unk     = sum(1 for r in valid_log if r.get("outcome") == "OUTCOME_UNKNOWN")
 
-    am = st.columns(5)
+    am = st.columns(6)
     am[0].metric("TRADES",    total)
     am[1].metric("DIRECTION", f"{correct/total*100:.0f}%", f"{correct}/{total}")
     am[2].metric("TARGET 1",  f"{t1/total*100:.0f}%",      f"{t1}/{total}")
     am[3].metric("TARGET 2",  f"{t2/total*100:.0f}%",      f"{t2}/{total}")
     am[4].metric("SL HIT",    f"{sl/total*100:.0f}%",      f"{sl}/{total}")
+    am[5].metric("UNKNOWN",   unk, delta="need intraday data" if unk else None,
+                 delta_color="off")
 
     with st.expander("[LOG] Full outcome history"):
         df_log = pd.DataFrame(valid_log)
@@ -1185,10 +1427,64 @@ else:
                   "sl_hit","target_1_reached","target_2_reached"]
         if "claude_grade" in df_log.columns:
             cols.append("claude_grade")
+        if "path_note" in df_log.columns:
+            cols.append("path_note")
         st.dataframe(
             df_log[[c for c in cols if c in df_log.columns]].sort_values("date", ascending=False),
             use_container_width=True,
         )
+
+    # Ambiguity warnings in accuracy log
+    _ambiguous    = [r for r in valid_log if r.get("outcome") == "OUTCOME_UNKNOWN"]
+    _intraday_src = [r for r in valid_log if r.get("data_source") == "INTRADAY"]
+    if _ambiguous:
+        st.markdown(
+            f'<div style="background:#1a0f00;border-left:3px solid {C["amber"]};'
+            f'padding:10px 14px;font-family:monospace;font-size:13px;line-height:1.7;'
+            f'color:#ffffff;margin-top:6px">'
+            f'<span style="color:{C["amber"]};font-weight:700">[OUTCOME AUDIT] </span>'
+            f'{len(_ambiguous)} trade(s) marked OUTCOME_UNKNOWN: both SL and target triggered via '
+            f'daily OHLC H/L extremes — intraday fill sequence cannot be confirmed. '
+            f'These are excluded from win rate. '
+            f'Fix: provide 5m CSV files in data/intraday/ (see docs/data_requirements.md).</div>',
+            unsafe_allow_html=True,
+        )
+    if _intraday_src:
+        st.markdown(
+            f'<div style="background:#001500;border-left:3px solid {C["success"]};'
+            f'padding:8px 14px;font-family:monospace;font-size:12px;color:#ffffff;margin-top:4px">'
+            f'<span style="color:{C["success"]};font-weight:700">[INTRADAY CONFIRMED] </span>'
+            f'{len(_intraday_src)} trade outcome(s) resolved from intraday candle sequence '
+            f'(fill order confirmed — not from OHLC extremes).</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Entry trigger feasibility check for historical trades
+    _trigger_audits = []
+    for _r in valid_log:
+        _trade_ref = next(
+            (t for t in trades_all if t.get("symbol") == _r.get("symbol")), None
+        )
+        if _trade_ref and _r.get("index_open"):
+            _tc = check_entry_trigger_met(_trade_ref, _r.get("index_open"))
+            if _tc["met"] is not None:
+                _trigger_audits.append({
+                    "symbol": _r["symbol"],
+                    "date":   _r["date"],
+                    "check":  _tc,
+                    "was_correct": _r.get("was_correct"),
+                })
+    if _trigger_audits:
+        with st.expander("[TRIGGER AUDIT] Entry trigger feasibility check"):
+            for _ta in _trigger_audits:
+                _tc_col = C["success"] if _ta["check"]["met"] else C["red"]
+                st.markdown(
+                    f'<div style="font-size:13px;font-family:monospace;padding:3px 0;color:{_tc_col}">'
+                    f'{_ta["symbol"]} ({_ta["date"]}): {_ta["check"]["reason"]}'
+                    + (f' | Direction was {"CORRECT" if _ta["was_correct"] else "WRONG"}' if _ta["was_correct"] is not None else "")
+                    + f'</div>',
+                    unsafe_allow_html=True,
+                )
 
 # ---------------------------------------------------------------------------
 # MORNING SUMMARY
