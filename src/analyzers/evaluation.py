@@ -73,6 +73,49 @@ def evaluate_accuracy_log(log: list[dict]) -> dict:
     }
 
 
+def get_first_30min_range(candles: "pd.DataFrame", market_open_hour: int = 9,
+                          market_open_minute: int = 15) -> dict:
+    """
+    Return the high and low of the first 30 minutes of trading from intraday candles.
+
+    Parameters
+    ----------
+    candles          : DataFrame with columns [datetime, high, low]
+    market_open_hour : NSE opens at 9
+    market_open_minute: NSE opens at 15
+
+    Returns
+    -------
+    {"high": float|None, "low": float|None, "available": bool, "candles_used": int}
+    """
+    import pandas as pd
+
+    if candles is None or candles.empty:
+        return {"high": None, "low": None, "available": False, "candles_used": 0}
+
+    df = candles.copy()
+    df["datetime"] = pd.to_datetime(df["datetime"])
+
+    # Filter to first 30 minutes of the first trading date
+    first_date = df["datetime"].dt.date.min()
+    open_time  = pd.Timestamp(
+        year=first_date.year, month=first_date.month, day=first_date.day,
+        hour=market_open_hour, minute=market_open_minute,
+    )
+    cutoff = open_time + pd.Timedelta(minutes=30)
+    window = df[df["datetime"] <= cutoff]
+
+    if window.empty:
+        return {"high": None, "low": None, "available": False, "candles_used": 0}
+
+    return {
+        "high":         float(window["high"].max()),
+        "low":          float(window["low"].min()),
+        "available":    True,
+        "candles_used": len(window),
+    }
+
+
 def check_entry_trigger_met(
     trade: dict,
     index_open: float | None,

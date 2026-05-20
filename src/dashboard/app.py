@@ -21,6 +21,8 @@ from src.analyzers.evaluation import (
     audit_predictions_vs_triggers,
 )
 from src.fetchers.data_availability import check_data_availability
+from src.fetchers.intraday_loader   import list_intraday_files, save_uploaded_csv
+from src.analyzers.evaluation       import get_first_30min_range
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -705,6 +707,123 @@ if _dq["penalty_note"] and _dq["missing_layers"]:
         f'{_dq["penalty_note"]}</div>',
         unsafe_allow_html=True,
     )
+
+# ---------------------------------------------------------------------------
+# INTRADAY DATA MANAGER — upload and list 5m/15m/30m candle CSVs
+# ---------------------------------------------------------------------------
+
+_intraday_files = list_intraday_files()
+_intraday_label = (
+    f"[INTRADAY DATA] {len(_intraday_files)} file(s) loaded — click to manage"
+    if _intraday_files
+    else "[INTRADAY DATA] No candle files loaded — click to upload"
+)
+
+with st.expander(_intraday_label):
+    st.markdown(
+        f'<div style="font-family:monospace;font-size:12px;color:{C["text2"]};'
+        f'line-height:1.7;margin-bottom:10px">'
+        f'Intraday candles resolve SL vs target hit order (avoids OUTCOME_UNKNOWN). '
+        f'Place files in <code>data/intraday/</code> or upload below.<br>'
+        f'Naming: <code>NIFTY_20260520_5m.csv</code> — schema: '
+        f'<code>symbol, datetime, open, high, low, close, volume, timeframe</code></div>',
+        unsafe_allow_html=True,
+    )
+
+    # --- Upload widget ---
+    _uploaded = st.file_uploader(
+        "Upload intraday CSV",
+        type=["csv"],
+        key="intraday_upload",
+        help="One symbol per file. Columns: symbol, datetime, open, high, low, close, volume, timeframe",
+    )
+    if _uploaded is not None:
+        _save_result = save_uploaded_csv(_uploaded.getvalue())
+        if _save_result["saved"]:
+            _sv_stats = _save_result["stats"]
+            st.success(
+                f"Saved: {_save_result['filename']} — "
+                f"{_sv_stats['rows']} rows | {_sv_stats['date_range']} | "
+                f"timeframe: {', '.join(_sv_stats['timeframes'])}"
+            )
+            if _save_result["warnings"]:
+                for _ww in _save_result["warnings"]:
+                    st.warning(_ww)
+            st.rerun()
+        else:
+            for _err in _save_result["errors"]:
+                st.error(f"Upload rejected: {_err}")
+            if _save_result["warnings"]:
+                for _ww in _save_result["warnings"]:
+                    st.warning(_ww)
+
+    # --- File list ---
+    if not _intraday_files:
+        st.markdown(
+            f'<div style="font-family:monospace;font-size:13px;color:{C["neutral"]};'
+            f'padding:10px 0">No intraday CSV files found in data/intraday/</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        _valid_files   = [f for f in _intraday_files if f["valid"]]
+        _invalid_files = [f for f in _intraday_files if not f["valid"]]
+
+        # Valid files table
+        if _valid_files:
+            _rows_html = "".join(
+                f'<tr style="border-bottom:1px solid {C["border"]}">'
+                f'<td style="padding:5px 8px;color:{C["green"]};font-weight:700">'
+                f'{", ".join(f["stats"].get("symbols", ["?"]))} </td>'
+                f'<td style="padding:5px 8px;color:{C["text2"]}">'
+                f'{", ".join(f["stats"].get("timeframes", ["?"]))} </td>'
+                f'<td style="padding:5px 8px;color:{C["text2"]}">'
+                f'{f["stats"].get("date_range", "—")} </td>'
+                f'<td style="padding:5px 8px;color:{C["neutral"]}">'
+                f'{f["stats"].get("rows", 0):,} rows </td>'
+                f'<td style="padding:5px 8px;color:{C["neutral"]};font-size:11px">'
+                f'{f["filename"]} </td>'
+                f'</tr>'
+                for f in _valid_files
+            )
+            st.markdown(
+                f'<table style="width:100%;border-collapse:collapse;'
+                f'font-family:monospace;font-size:12px">'
+                f'<thead><tr style="border-bottom:1px solid {C["green"]}">'
+                f'<th style="padding:4px 8px;color:{C["green"]};text-align:left">SYMBOL</th>'
+                f'<th style="padding:4px 8px;color:{C["green"]};text-align:left">TF</th>'
+                f'<th style="padding:4px 8px;color:{C["green"]};text-align:left">DATE RANGE</th>'
+                f'<th style="padding:4px 8px;color:{C["green"]};text-align:left">ROWS</th>'
+                f'<th style="padding:4px 8px;color:{C["green"]};text-align:left">FILE</th>'
+                f'</tr></thead><tbody>{_rows_html}</tbody></table>',
+                unsafe_allow_html=True,
+            )
+            st.markdown("<br>", unsafe_allow_html=True)
+
+        # Today's analysis coverage
+        _today_syms  = _da.get("intraday_symbols", [])
+        _active_syms = [t.get("symbol","") for t in trades_all]
+        if _active_syms:
+            _cov_html = "".join(
+                f'<div style="font-size:12px;font-family:monospace;padding:2px 0">'
+                f'<span style="color:{"#4caf50" if s in _today_syms else C["amber"]}">'
+                f'{"✓" if s in _today_syms else "—"} {s}: '
+                f'{"intraday available — SL/target sequence confirmed" if s in _today_syms else "no intraday data — outcome may be OUTCOME_UNKNOWN"}'
+                f'</span></div>'
+                for s in _active_syms
+            )
+            st.markdown(
+                f'<div style="font-size:11px;color:{C["neutral"]};font-family:monospace;'
+                f'letter-spacing:1px;margin:8px 0 4px 0">TODAY\'S TRADE COVERAGE</div>'
+                f'<div style="background:#0a100a;border:1px solid {C["border"]};'
+                f'padding:8px 10px;border-radius:3px">{_cov_html}</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Invalid files warnings
+        if _invalid_files:
+            for _bf in _invalid_files:
+                for _berr in _bf["errors"]:
+                    st.error(f"{_bf['filename']}: {_berr}")
 
 st.markdown("---")
 
