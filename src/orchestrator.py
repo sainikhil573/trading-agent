@@ -20,6 +20,14 @@ from src.fetchers.news_fetcher      import fetch_market_headlines
 from src.analyzers.signal_analyzer  import build_market_signal, build_stock_signals
 from src.analyzers.claude_analyzer  import ClaudeAnalyzer
 
+# Fixed 20-stock F&O universe for daily signal generation
+FNO_UNIVERSE = [
+    "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK",
+    "AXISBANK", "KOTAKBANK", "SBIN", "TATASTEEL", "HINDALCO",
+    "ONGC", "BPCL", "MARUTI", "BAJFINANCE", "TATAMOTORS",
+    "WIPRO", "SUNPHARMA", "DRREDDY", "ADANIENT", "LT",
+]
+
 logger = logging.getLogger(__name__)
 IST    = pytz.timezone("Asia/Kolkata")
 
@@ -92,6 +100,11 @@ def run_morning_analysis(api_key: str) -> dict:
     stock_symbols  = df_fno["symbol"].tolist() if not df_fno.empty else []
     stock_tech     = fetch_stock_technicals(stock_symbols[:10])
 
+    logger.info("[4b] Fetching F&O universe technicals (%d stocks)...", len(FNO_UNIVERSE))
+    fno_universe_tech = fetch_stock_technicals(FNO_UNIVERSE)
+    ok_count = sum(1 for t in fno_universe_tech if not t.get("error"))
+    logger.info("  F&O universe: %d/%d stocks fetched successfully", ok_count, len(FNO_UNIVERSE))
+
     # -- Step 5: News headlines -----------------------------------------
     logger.info("[5/6] Fetching news headlines...")
     news = fetch_market_headlines(max_items=20)
@@ -121,19 +134,20 @@ def run_morning_analysis(api_key: str) -> dict:
 
     analyzer = ClaudeAnalyzer(api_key=api_key)
     brief = analyzer.generate_trade_brief(
-        nifty_signal     = nifty_signal,
-        banknifty_signal = banknifty_signal,
-        global_cues      = global_cues,
-        fii_dii          = fii_dii,
-        participant_oi   = participant_oi,
-        nifty_tech       = nifty_tech,
-        banknifty_tech   = banknifty_tech,
-        stock_signals    = stock_signals_list,
-        stock_technicals = stock_tech,
-        block_deals      = block_deals,
-        news             = news,
-        analysis_date    = date.today().strftime("%d-%b-%Y (%A)"),
-        yesterday_memory = yesterday_memory,
+        nifty_signal             = nifty_signal,
+        banknifty_signal         = banknifty_signal,
+        global_cues              = global_cues,
+        fii_dii                  = fii_dii,
+        participant_oi           = participant_oi,
+        nifty_tech               = nifty_tech,
+        banknifty_tech           = banknifty_tech,
+        stock_signals            = stock_signals_list,
+        stock_technicals         = stock_tech,
+        block_deals              = block_deals,
+        news                     = news,
+        analysis_date            = date.today().strftime("%d-%b-%Y (%A)"),
+        yesterday_memory         = yesterday_memory,
+        fno_universe_technicals  = fno_universe_tech,
     )
 
     # Attach raw context for the dashboard and pre-open run
@@ -273,6 +287,27 @@ def _print_morning_brief(brief: dict, today: str) -> None:
             print(f"  Recovery risk  : {t.get('mid_session_recovery_risk','')}")
             print(f"  Reasoning      : {t.get('reasoning','')}")
             print(f"  Key Risk       : {t.get('key_risk','')}")
+
+    stock_trades = brief.get("stock_trades", [])
+    if stock_trades:
+        print(f"\n  --- STOCK F&O SIGNALS ({len(stock_trades)}) ---")
+        for st in stock_trades:
+            aligned = " [SECTOR ALIGNED]" if st.get("sector_aligned") else ""
+            print(f"\n  {st.get('symbol','?')} ({st.get('sector','')}) — "
+                  f"{st.get('signal','?')}  "
+                  f"(confidence: {st.get('confidence','?')}/10  |  "
+                  f"size: {st.get('position_size','?')}){aligned}")
+            print(f"  Entry: {st.get('entry_price','?')}  "
+                  f"SL: {st.get('stop_loss','?')}  "
+                  f"T1: {st.get('target_1','?')}  "
+                  f"T2: {st.get('target_2','?')}  "
+                  f"RR: 1:{st.get('risk_reward','?')}")
+            print(f"  Trigger: {st.get('trigger','')}")
+            reasoning = st.get('reasoning','')
+            if reasoning:
+                print(f"  Reasoning: {reasoning[:200]}{'...' if len(reasoning) > 200 else ''}")
+    else:
+        print("  No stock signals above 7.0 confidence threshold today.")
 
     if brief.get("morning_summary"):
         print(f"\n  Summary: {brief['morning_summary']}")
