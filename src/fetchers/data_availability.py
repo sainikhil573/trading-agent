@@ -16,6 +16,7 @@ from datetime import date
 from pathlib import Path
 
 from src.fetchers.intraday_provider import LocalCSVIntradayProvider, UnavailableIntradayProvider
+from src.fetchers.broker_config import get_provider_config, get_configured_provider
 
 
 # All data layers the system uses or could use, with metadata for the dashboard
@@ -121,10 +122,11 @@ def check_data_availability(meta: dict, trading_date: date | None = None) -> dic
       "layers":             [{"name", "key", "available", "source", "what_breaks", ...}],
       "missing_required":   [str],   # names of required-but-unavailable layers
       "actionable":         bool,    # False if any required layer missing
-      "intraday_provider":  str,     # human-readable provider name
+      "intraday_provider":  str,     # human-readable name of the active provider
       "intraday_available": bool,
-      "intraday_symbols":   [str],   # which symbols have intraday data today
+      "intraday_symbols":   [str],   # which symbols have CSV data today
       "checked_date":       str,     # ISO date string
+      "provider_config":    dict,    # raw output of get_provider_config()
     }
     """
     if trading_date is None:
@@ -158,7 +160,12 @@ def check_data_availability(meta: dict, trading_date: date | None = None) -> dic
         "gift_nifty":     False,  # never available (no API)
     }
 
-    # --- Intraday check (file-based) ---
+    # --- Intraday check ---
+    # File listing always uses LocalCSV (broker APIs cannot enumerate past-date files).
+    # Active provider name comes from broker_config to show what will be used at runtime.
+    prov_config    = get_provider_config()
+    active_provider = get_configured_provider(prov_config)
+
     csv_provider    = LocalCSVIntradayProvider()
     intraday_symbols: list[str] = []
     if csv_provider.is_available():
@@ -166,10 +173,7 @@ def check_data_availability(meta: dict, trading_date: date | None = None) -> dic
     intraday_available    = len(intraday_symbols) > 0
     layer_status["intraday"] = intraday_available
 
-    intraday_provider_name = (
-        csv_provider.name if csv_provider.is_available()
-        else UnavailableIntradayProvider().name
-    )
+    intraday_provider_name = active_provider.name
 
     # --- Build per-layer result list ---
     layers_out = []
@@ -191,4 +195,5 @@ def check_data_availability(meta: dict, trading_date: date | None = None) -> dic
         "intraday_available": intraday_available,
         "intraday_symbols":   intraday_symbols,
         "checked_date":       trading_date.isoformat(),
+        "provider_config":    prov_config,
     }
