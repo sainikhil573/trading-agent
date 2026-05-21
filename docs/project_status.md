@@ -14,12 +14,13 @@ dashboard display, and post-market accuracy tracking using Claude API.
 
 ## Current Stage
 
-**Post-gate output consistency fixed (feature/post-gate-output-consistency).**
-All output fields now accurately reflect post-gate state: `trading_recommended` is
-updated after gates, stock trades go through data-quality gates, `max_trades_recommended`
-is enforced, `watchlist_only` is separated from actionable trades, FII/DII zero is shown
-as "Unavailable" not neutral, and `post_gate_summary` replaces pre-gate Claude summary
-when trades are blocked. Dashboard shows a truthful post-gate banner and blocked stock trades.
+**Instrument master / token mapping layer added (feature/instrument-master-token-mapping).**
+`src/fetchers/instrument_master.py` provides a local CSV-based lookup system that translates
+human-readable symbols (NIFTY, RELIANCE) into broker-specific tokens (Kite `instrument_token`,
+Angel One `symbol_token`) before any fetch attempt. Both provider stubs now perform token
+lookup rather than logging a generic "not implemented" warning, returning empty DataFrame
+with a clear diagnostic when token is missing. Dashboard DATA AVAILABILITY section shows
+instrument master load status and per-index token readiness. No live API calls made in this branch.
 
 ---
 
@@ -34,7 +35,8 @@ when trades are blocked. Dashboard shows a truthful post-gate banner and blocked
 | PR2 | Analysis root-cause audit — signal validation hardening, data quality gates, data_requirements.md | e285bf5–10b61dc |
 | PR3 | Intraday CSV ingestion, validation, dashboard upload UI | 32051de |
 | PR4 | Broker data provider integration (Angel One + Kite stubs, normalisation, broker_config) | e6cff2f |
-| PR5 | Post-gate output consistency — trading_recommended, stock gates, max_trades cap, watchlist_only, FII/DII unavailable semantics | (this branch) |
+| PR5 | Post-gate output consistency — trading_recommended, stock gates, max_trades cap, watchlist_only, FII/DII unavailable semantics | ea094c5 |
+| PR6 | Instrument master token mapping — InstrumentMaster, lookup helpers, provider stub update, dashboard status | (this branch) |
 
 ---
 
@@ -47,6 +49,7 @@ when trades are blocked. Dashboard shows a truthful post-gate banner and blocked
 | `feature/intraday-csv-upload-and-loader` | CSV intraday ingestion, schema validation, dashboard uploader |
 | `feature/broker-data-provider-integration` | AngelOne/Kite stubs, normalisation layer, broker_config, docs |
 | `feature/post-gate-output-consistency` | Post-gate output truthfulness: stock gates, trading_recommended flip, watchlist_only, FII/DII unavailable display |
+| `feature/instrument-master-token-mapping` | Instrument master / token mapping: InstrumentMaster, lookup helpers, broker stub update, dashboard status |
 
 ---
 
@@ -69,8 +72,9 @@ src/fetchers/
   intraday_loader.py      — reads CSVs from data/intraday/
   intraday_validator.py   — validates CSV schema and data quality
   intraday_provider.py    — provider interface: AngelOne stub, Kite stub, LocalCSV, Unavailable
-  broker_config.py        — reads BROKER_PROVIDER env var, selects provider
-  data_availability.py    — derives data quality flags
+  broker_config.py        — reads BROKER_PROVIDER env var, selects provider; passes InstrumentMaster to providers
+  data_availability.py    — derives data quality flags; reports instrument master status
+  instrument_master.py    — loads data/instruments/instrument_master.csv; symbol→token lookup for Kite/Angel One
 
 src/analyzers/
   signal_analyzer.py      — builds NIFTY/BANKNIFTY/stock signal dicts from raw fetcher data
@@ -147,8 +151,9 @@ src/dashboard/app.py      — Streamlit UI: morning brief, pre-open, post-market
 | Technical indicators (EMA/RSI/MACD) | yfinance 60-day daily | Working |
 | Market news / sentiment | RSS (ET + Moneycontrol) | Working |
 | Intraday candles — CSV upload | `data/intraday/*.csv` | Working |
-| Intraday candles — Angel One | SmartAPI stub | Not wired (stub only) |
-| Intraday candles — Zerodha Kite | KiteConnect stub | Not wired (stub only) |
+| Intraday candles — Angel One | SmartAPI stub | Token lookup wired; live fetch not yet implemented |
+| Intraday candles — Zerodha Kite | KiteConnect stub | Token lookup wired; live fetch not yet implemented |
+| Instrument token master | Local CSV `data/instruments/instrument_master.csv` | Schema defined; user must supply real tokens |
 | GIFT Nifty futures | None | Missing — no free source |
 | FII/DII (pre-market reliability) | NSE API | Unreliable pre-market |
 
@@ -156,7 +161,12 @@ src/dashboard/app.py      — Streamlit UI: morning brief, pre-open, post-market
 
 ## Known Limitations
 
-1. **Stock gate always penalizes pre-market** — FII/DII is always 0 before NSE publishes
+1. **Instrument master file not supplied** — `data/instruments/instrument_master.csv` is gitignored
+   and must be downloaded from the broker. Until present, broker providers return empty candles
+   with a diagnostic log. The schema_example.csv shows the required column layout.
+2. **Instrument tokens change on expiry** — option contract tokens are week/month specific.
+   The master file must be refreshed before each expiry cycle.
+3. **Stock gate always penalizes pre-market** — FII/DII is always 0 before NSE publishes
    (~15:30 IST), so the -0.5 + -0.5 = -1.0 penalty gates out all stock trades with
    confidence < 8.0 during morning analysis. This is honest but aggressive. Resolved by
    Phase 5 (live broker intraday data) or running analysis post-market.
@@ -192,7 +202,7 @@ src/dashboard/app.py      — Streamlit UI: morning brief, pre-open, post-market
 
 | Priority | Phase | Description |
 |----------|-------|-------------|
-| High | **Phase 5 — Live intraday wiring** | Wire Angel One or Kite `_fetch()`, add symbol→token lookup, enable live outcome resolution |
+| High | **Phase 5 — Live intraday wiring** | Wire Angel One or Kite `_fetch()` with real SmartConnect/KiteConnect calls (token lookup layer is ready) |
 | High | **Phase 6 — GIFT Nifty** | Add dedicated GIFT Nifty source (IBKR or broker API) |
 | Medium | **Phase 7 — Backtesting** | Build a replay pipeline using NSE Bhavcopy + option chain archives |
 | Medium | **Phase 8 — Alerts** | Telegram/email alerts for GO/WAIT/SKIP decisions at 9:00 AM |
@@ -366,3 +376,43 @@ src/dashboard/app.py      — Streamlit UI: morning brief, pre-open, post-market
   with confidence < 8.0 (expected — FII/DII is always 0 before 15:30 IST). Resolved
   with Phase 5 live intraday data or post-market analysis run.
 - **Next step:** Phase 5 — wire Angel One or Kite `_fetch()` + instrument token tables.
+
+---
+
+### 2026-05-21 | PR6 — Instrument master token mapping | `feature/instrument-master-token-mapping`
+
+- **Branch:** `feature/instrument-master-token-mapping`
+- **Files changed:** `src/fetchers/instrument_master.py` (new),
+  `src/fetchers/intraday_provider.py` (provider stubs updated to use token lookup),
+  `src/fetchers/broker_config.py` (passes InstrumentMaster to providers),
+  `src/fetchers/data_availability.py` (instrument master status added to report),
+  `src/dashboard/app.py` (INSTRUMENT MASTER + TOKEN READINESS status lines added),
+  `data/instruments/.gitkeep` (new directory), `data/instruments/schema_example.csv` (new),
+  `docs/instrument_master.md` (new), `tests/test_instrument_master.py` (41 new tests),
+  `.gitignore` (instrument_master.csv excluded), `docs/project_status.md` (this entry).
+- **Feature added:**
+  - `InstrumentMaster` class: loads `data/instruments/instrument_master.csv`,
+    validates required columns, normalises all fields.
+  - Lookup helpers: `lookup_index_symbol()`, `lookup_equity_symbol()`,
+    `lookup_option_contract()`, `token_readiness()`.
+  - `Instrument` dataclass with `get_token(provider)` / `has_token(provider)`:
+    returns `instrument_token` (int) for Kite, `symbol_token` (str) for Angel One.
+  - `normalize_symbol_input()`: strips `.NS`/`.BO`, maps `^NSEI` → NIFTY, uppercases.
+  - Module-level singleton `get_instrument_master()` for lazy loading.
+  - Provider stubs (`AngelOneIntradayProvider`, `KiteIntradayProvider`) now accept
+    `instrument_master` kwarg; `_fetch()` performs lookup and logs clear diagnostics
+    about missing file, missing symbol, or missing token rather than generic warning.
+  - `broker_config.get_configured_provider()` passes the instrument master to broker providers.
+  - `data_availability.check_data_availability()` now returns `instrument_master` dict
+    with `loaded`, `path`, `record_count`, `error`, and `token_readiness` fields.
+  - Dashboard: `[INSTRUMENT MASTER]` status line + `[TOKEN READINESS]` per-index token check.
+  - `data/instruments/instrument_master.csv` gitignored (user must supply real tokens).
+  - `data/instruments/schema_example.csv` shows required column layout with zero/empty placeholder tokens.
+- **Tests/checks:** 245 passed, 2 skipped (pre-existing broker package skips). 41 new
+  instrument master tests covering all loading, lookup, token field, normalize, readiness,
+  and provider stub scenarios.
+- **Remaining limitations:** instrument_master.csv must be downloaded from broker and
+  placed locally; option tokens expire and must be refreshed each cycle;
+  live `_fetch()` calls not yet implemented.
+- **Next step:** Phase 5 — implement live `_fetch()` in AngelOne/Kite providers using
+  resolved tokens + SmartConnect / KiteConnect API calls.

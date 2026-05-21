@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 data/raw/
 data/processed/
+data/instruments/instrument_master.csv
 logs/
 .venv/
 venv/

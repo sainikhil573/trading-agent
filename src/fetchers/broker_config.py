@@ -126,6 +126,13 @@ def get_configured_provider(config: dict | None = None):
 
     provider_name = config.get("provider", "csv")
 
+    # Load instrument master once for whichever broker provider is selected
+    try:
+        from src.fetchers.instrument_master import get_instrument_master
+        master = get_instrument_master()
+    except Exception:
+        master = None
+
     try:
         if provider_name == "angelone":
             if not config.get("angelone_ready"):
@@ -134,7 +141,10 @@ def get_configured_provider(config: dict | None = None):
                     config.get("missing_creds", []),
                 )
             else:
-                p = AngelOneIntradayProvider(creds=config["angelone_creds"])
+                p = AngelOneIntradayProvider(
+                    creds=config["angelone_creds"],
+                    instrument_master=master,
+                )
                 if p.is_available():
                     logger.info("Active intraday provider: %s", p.name)
                     return p
@@ -151,7 +161,10 @@ def get_configured_provider(config: dict | None = None):
                     config.get("missing_creds", []),
                 )
             else:
-                p = KiteIntradayProvider(creds=config["kite_creds"])
+                p = KiteIntradayProvider(
+                    creds=config["kite_creds"],
+                    instrument_master=master,
+                )
                 if p.is_available():
                     logger.info("Active intraday provider: %s", p.name)
                     return p

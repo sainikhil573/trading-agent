@@ -313,12 +313,12 @@ class AngelOneIntradayProvider(IntradayProvider):
     Status
     ------
     Credential-aware stub. Normalisation is fully implemented and tested.
-    Actual API fetch is not yet wired (returns empty DataFrame with a warning).
-    To complete the integration: implement _fetch() with live SmartConnect calls
-    and a symbol→token lookup table.
+    Instrument master lookup is integrated — _fetch() logs token readiness but
+    does not yet make live API calls.
+    To complete the integration: implement the live SmartConnect call in _fetch().
     """
 
-    def __init__(self, creds: dict | None = None):
+    def __init__(self, creds: dict | None = None, instrument_master=None):
         if creds is None:
             creds = {
                 "api_key":     os.environ.get("ANGELONE_API_KEY", ""),
@@ -328,6 +328,7 @@ class AngelOneIntradayProvider(IntradayProvider):
         self._creds      = creds
         self._has_creds  = bool(creds.get("api_key") and creds.get("client_code"))
         self._pkg_ok     = self._check_package()
+        self._master     = instrument_master  # InstrumentMaster | None
 
     @staticmethod
     def _check_package() -> bool:
@@ -365,14 +366,50 @@ class AngelOneIntradayProvider(IntradayProvider):
         """
         Fetch from Angel One SmartAPI.
 
-        Not yet fully implemented: symbol→token lookup is required before live calls.
-        When credentials and package are present this logs a warning and returns empty.
-        Replace this body with live SmartConnect calls when symbol tokens are available.
+        Instrument lookup is attempted when an InstrumentMaster is available.
+        Live SmartConnect API call is not yet implemented — returns empty DataFrame.
+        To complete: call SmartConnect.getCandleData() with the resolved symbol_token.
         """
+        from src.fetchers.instrument_master import normalize_symbol_input
+
+        clean_sym = normalize_symbol_input(symbol)
+
+        if self._master is None or not self._master.is_loaded:
+            logger.warning(
+                "AngelOne _fetch: instrument master not loaded for %s %s — "
+                "place data/instruments/instrument_master.csv (see docs/instrument_master.md). "
+                "Returning empty candles.",
+                clean_sym, trading_date,
+            )
+            return pd.DataFrame(columns=CANDLE_COLUMNS)
+
+        inst = (
+            self._master.lookup_index_symbol("angelone", clean_sym)
+            or self._master.lookup_equity_symbol("angelone", clean_sym)
+        )
+        if inst is None:
+            logger.warning(
+                "AngelOne _fetch: symbol '%s' not found in instrument master for angelone. "
+                "Add it to data/instruments/instrument_master.csv. Returning empty candles.",
+                clean_sym,
+            )
+            return pd.DataFrame(columns=CANDLE_COLUMNS)
+
+        token = inst.get_token("angelone")
+        if token is None:
+            logger.warning(
+                "AngelOne _fetch: symbol '%s' found in master but symbol_token is empty. "
+                "Update data/instruments/instrument_master.csv with a real Angel One token. "
+                "Returning empty candles.",
+                clean_sym,
+            )
+            return pd.DataFrame(columns=CANDLE_COLUMNS)
+
+        # Token resolved — live API call not yet implemented in this branch.
         logger.warning(
-            "AngelOne _fetch not yet implemented for %s %s — "
-            "symbol→token lookup required. Returning empty candles.",
-            symbol, trading_date,
+            "AngelOne _fetch: token '%s' resolved for '%s' but live SmartConnect call "
+            "is not yet implemented. Returning empty candles.",
+            token, clean_sym,
         )
         return pd.DataFrame(columns=CANDLE_COLUMNS)
 
@@ -399,12 +436,12 @@ class KiteIntradayProvider(IntradayProvider):
     Status
     ------
     Credential-aware stub. Normalisation is fully implemented and tested.
-    Actual API fetch is not yet wired (returns empty DataFrame with a warning).
-    To complete the integration: implement _fetch() with live KiteConnect calls
-    and instrument token lookup for NSE F&O symbols.
+    Instrument master lookup is integrated — _fetch() logs token readiness but
+    does not yet make live API calls.
+    To complete: implement live KiteConnect.historical_data() call in _fetch().
     """
 
-    def __init__(self, creds: dict | None = None):
+    def __init__(self, creds: dict | None = None, instrument_master=None):
         if creds is None:
             creds = {
                 "api_key":      os.environ.get("KITE_API_KEY", ""),
@@ -413,6 +450,7 @@ class KiteIntradayProvider(IntradayProvider):
         self._creds     = creds
         self._has_creds = bool(creds.get("api_key") and creds.get("access_token"))
         self._pkg_ok    = self._check_package()
+        self._master    = instrument_master  # InstrumentMaster | None
 
     @staticmethod
     def _check_package() -> bool:
@@ -450,14 +488,50 @@ class KiteIntradayProvider(IntradayProvider):
         """
         Fetch from Zerodha Kite Connect.
 
-        Not yet fully implemented: instrument token lookup is required before live calls.
-        When credentials and package are present this logs a warning and returns empty.
-        Replace this body with live KiteConnect calls when instrument tokens are available.
+        Instrument lookup is attempted when an InstrumentMaster is available.
+        Live KiteConnect API call is not yet implemented — returns empty DataFrame.
+        To complete: call kite.historical_data(instrument_token, ...) with resolved token.
         """
+        from src.fetchers.instrument_master import normalize_symbol_input
+
+        clean_sym = normalize_symbol_input(symbol)
+
+        if self._master is None or not self._master.is_loaded:
+            logger.warning(
+                "Kite _fetch: instrument master not loaded for %s %s — "
+                "place data/instruments/instrument_master.csv (see docs/instrument_master.md). "
+                "Returning empty candles.",
+                clean_sym, trading_date,
+            )
+            return pd.DataFrame(columns=CANDLE_COLUMNS)
+
+        inst = (
+            self._master.lookup_index_symbol("kite", clean_sym)
+            or self._master.lookup_equity_symbol("kite", clean_sym)
+        )
+        if inst is None:
+            logger.warning(
+                "Kite _fetch: symbol '%s' not found in instrument master for kite. "
+                "Add it to data/instruments/instrument_master.csv. Returning empty candles.",
+                clean_sym,
+            )
+            return pd.DataFrame(columns=CANDLE_COLUMNS)
+
+        token = inst.get_token("kite")
+        if token is None:
+            logger.warning(
+                "Kite _fetch: symbol '%s' found in master but instrument_token is 0 or missing. "
+                "Update data/instruments/instrument_master.csv with a real Kite instrument token. "
+                "Returning empty candles.",
+                clean_sym,
+            )
+            return pd.DataFrame(columns=CANDLE_COLUMNS)
+
+        # Token resolved — live API call not yet implemented in this branch.
         logger.warning(
-            "Kite _fetch not yet implemented for %s %s — "
-            "instrument token lookup required. Returning empty candles.",
-            symbol, trading_date,
+            "Kite _fetch: token %s resolved for '%s' but live KiteConnect call "
+            "is not yet implemented. Returning empty candles.",
+            token, clean_sym,
         )
         return pd.DataFrame(columns=CANDLE_COLUMNS)
 

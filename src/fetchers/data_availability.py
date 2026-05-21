@@ -17,6 +17,7 @@ from pathlib import Path
 
 from src.fetchers.intraday_provider import LocalCSVIntradayProvider, UnavailableIntradayProvider
 from src.fetchers.broker_config import get_provider_config, get_configured_provider
+from src.fetchers.instrument_master import get_instrument_master
 
 
 # All data layers the system uses or could use, with metadata for the dashboard
@@ -187,6 +188,22 @@ def check_data_availability(meta: dict, trading_date: date | None = None) -> dic
 
     missing_required = [r["name"] for r in layers_out if r["required"] and not r["available"]]
 
+    # --- Instrument master status ---
+    master = get_instrument_master()
+    _index_syms = ["NIFTY", "BANKNIFTY"]
+    if master.is_loaded:
+        _token_readiness = master.token_readiness(prov_config.get("provider", "csv"), _index_syms)
+    else:
+        _token_readiness = {s: False for s in _index_syms}
+
+    instrument_master_info = {
+        "loaded":        master.is_loaded,
+        "path":          str(master.path),
+        "record_count":  master.record_count,
+        "error":         master.error,
+        "token_readiness": _token_readiness,
+    }
+
     return {
         "layers":             layers_out,
         "missing_required":   missing_required,
@@ -196,4 +213,5 @@ def check_data_availability(meta: dict, trading_date: date | None = None) -> dic
         "intraday_symbols":   intraday_symbols,
         "checked_date":       trading_date.isoformat(),
         "provider_config":    prov_config,
+        "instrument_master":  instrument_master_info,
     }

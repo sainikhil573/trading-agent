@@ -740,6 +740,45 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Instrument master status
+_im = _da.get("instrument_master", {})
+_im_loaded = _im.get("loaded", False)
+_im_count  = _im.get("record_count", 0)
+_im_error  = _im.get("error", "")
+_im_path   = _im.get("path", "data/instruments/instrument_master.csv")
+_im_color  = C["success"] if _im_loaded else C["amber"]
+_im_label  = (
+    f"Instrument master loaded: {_im_count} records from {Path(_im_path).name}"
+    if _im_loaded else
+    f"Instrument master NOT loaded — place broker token CSV at {_im_path} "
+    "(see docs/instrument_master.md). Broker API candle fetch will return empty until loaded."
+)
+st.markdown(
+    f'<div style="background:{C["card"]};border-left:3px solid {_im_color};'
+    f'padding:7px 14px;font-family:monospace;font-size:12px;color:{C["text2"]};margin:2px 0">'
+    f'<span style="color:{_im_color};font-weight:700">[INSTRUMENT MASTER] </span>{_im_label}</div>',
+    unsafe_allow_html=True,
+)
+
+# Token readiness for active provider (only shown when master is loaded)
+if _im_loaded:
+    _tok_ready = _im.get("token_readiness", {})
+    _tok_parts = []
+    for _sym, _ok in _tok_ready.items():
+        _c = C["success"] if _ok else C["amber"]
+        _tok_parts.append(
+            f'<span style="color:{_c}">{_sym}:{"✓" if _ok else "missing"}</span>'
+        )
+    if _tok_parts:
+        st.markdown(
+            f'<div style="background:{C["card"]};border-left:3px solid {C["neutral"]};'
+            f'padding:7px 14px;font-family:monospace;font-size:12px;color:{C["text2"]};margin:2px 0">'
+            f'<span style="color:{C["neutral"]};font-weight:700">[TOKEN READINESS] </span>'
+            f'Provider: {_prov_name} — '
+            + "  ".join(_tok_parts) + "</div>",
+            unsafe_allow_html=True,
+        )
+
 # Warn when broker provider is requested but credentials are incomplete
 if _prov_fall and _prov_miss:
     _cred_warn = (
