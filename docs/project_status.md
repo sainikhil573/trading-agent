@@ -14,10 +14,12 @@ dashboard display, and post-market accuracy tracking using Claude API.
 
 ## Current Stage
 
-**Phase 4 complete — broker data provider integration layer done.**
-System is functional end-to-end for pre-market → dashboard → post-market.
-Intraday broker APIs (Angel One, Kite) are stubbed but not wired for live calls.
-V1 is feature-complete except for live intraday provider and GIFT Nifty.
+**Post-gate output consistency fixed (feature/post-gate-output-consistency).**
+All output fields now accurately reflect post-gate state: `trading_recommended` is
+updated after gates, stock trades go through data-quality gates, `max_trades_recommended`
+is enforced, `watchlist_only` is separated from actionable trades, FII/DII zero is shown
+as "Unavailable" not neutral, and `post_gate_summary` replaces pre-gate Claude summary
+when trades are blocked. Dashboard shows a truthful post-gate banner and blocked stock trades.
 
 ---
 
@@ -32,6 +34,7 @@ V1 is feature-complete except for live intraday provider and GIFT Nifty.
 | PR2 | Analysis root-cause audit — signal validation hardening, data quality gates, data_requirements.md | e285bf5–10b61dc |
 | PR3 | Intraday CSV ingestion, validation, dashboard upload UI | 32051de |
 | PR4 | Broker data provider integration (Angel One + Kite stubs, normalisation, broker_config) | e6cff2f |
+| PR5 | Post-gate output consistency — trading_recommended, stock gates, max_trades cap, watchlist_only, FII/DII unavailable semantics | (this branch) |
 
 ---
 
@@ -43,6 +46,7 @@ V1 is feature-complete except for live intraday provider and GIFT Nifty.
 | `feature/analysis-root-cause-audit` | Trade gates, data quality gates, FII/DII reliability docs |
 | `feature/intraday-csv-upload-and-loader` | CSV intraday ingestion, schema validation, dashboard uploader |
 | `feature/broker-data-provider-integration` | AngelOne/Kite stubs, normalisation layer, broker_config, docs |
+| `feature/post-gate-output-consistency` | Post-gate output truthfulness: stock gates, trading_recommended flip, watchlist_only, FII/DII unavailable display |
 
 ---
 
@@ -152,7 +156,11 @@ src/dashboard/app.py      — Streamlit UI: morning brief, pre-open, post-market
 
 ## Known Limitations
 
-1. **Intraday brokers not wired** — `AngelOneIntradayProvider._fetch()` and
+1. **Stock gate always penalizes pre-market** — FII/DII is always 0 before NSE publishes
+   (~15:30 IST), so the -0.5 + -0.5 = -1.0 penalty gates out all stock trades with
+   confidence < 8.0 during morning analysis. This is honest but aggressive. Resolved by
+   Phase 5 (live broker intraday data) or running analysis post-market.
+2. **Intraday brokers not wired** — `AngelOneIntradayProvider._fetch()` and
    `KiteIntradayProvider._fetch()` return empty DataFrames; symbol→token lookup
    not implemented. Use CSV upload until credentials + wiring are done.
 2. **GIFT Nifty unavailable** — S&P 500 futures used as proxy (correlation ~0.6).
@@ -320,7 +328,7 @@ src/dashboard/app.py      — Streamlit UI: morning brief, pre-open, post-market
 
 ---
 
-### 2026-05-21 | docs — Project status tracker | (this branch)
+### 2026-05-21 | docs — Project status tracker | `baa69d9`
 
 - **Branch:** `docs/project-status-tracker`
 - **Files changed:** `docs/project_status.md` (new), `CLAUDE.md` (updated).
@@ -328,4 +336,33 @@ src/dashboard/app.py      — Streamlit UI: morning brief, pre-open, post-market
   CLAUDE.md instruction to read status file before any task.
 - **Tests/checks:** Docs only — no tests required.
 - **Remaining limitations:** None for this change.
-- **Next step:** Phase 5 — live intraday broker wiring.
+- **Next step:** Fix post-gate output consistency.
+
+---
+
+### 2026-05-21 | PR5 — Post-gate output consistency | `feature/post-gate-output-consistency`
+
+- **Branch:** `feature/post-gate-output-consistency`
+- **Files changed:** `src/analyzers/trade_gates.py` (gate_stock_trade added,
+  apply_trade_gates extended), `src/analyzers/claude_analyzer.py` (FII/DII
+  unavailable prompt display), `src/dashboard/app.py` (post-gate banner, FII
+  unavailable metric, blocked stock trades, watchlist section, post_gate_summary),
+  `tests/test_trade_gates.py` (17 new tests in TestGateStockTrade +
+  TestPostGateConsistency), `docs/project_status.md` (this entry).
+- **Feature added:**
+  - `gate_stock_trade()`: simplified gate for stock F&O trades (data penalty + confidence floor).
+  - `apply_trade_gates()` now gates stock trades, enforces `max_trades_recommended` cap,
+    separates `watchlist_only`, adds `post_gate_summary`, updates `trading_recommended` to
+    `False` when `total_actionable == 0`, adds `final_recommendation_status` to `_gate_summary`.
+  - `post_gate_summary` field: truthful one-line status replacing pre-gate Claude summary
+    when trades are blocked.
+  - FII/DII prompt shows "UNAVAILABLE — pre-market zero" instead of "+0.0 Cr".
+  - Dashboard: post-gate status banner (green/amber/red), FII metric shows "Unavailable",
+    blocked stock trades visible in BLOCKED section, `watchlist_only` section, morning
+    summary labelled "[CLAUDE ANALYSIS — PRE-GATE]" when overridden.
+- **Tests/checks:** 204 passed, 2 skipped (pre-existing; require live broker packages).
+  All 49 trade gate tests pass including 17 new post-gate consistency tests.
+- **Remaining limitations:** Stock gate's -1.0 pre-market penalty blocks all stocks
+  with confidence < 8.0 (expected — FII/DII is always 0 before 15:30 IST). Resolved
+  with Phase 5 live intraday data or post-market analysis run.
+- **Next step:** Phase 5 — wire Angel One or Kite `_fetch()` + instrument token tables.

@@ -487,7 +487,8 @@ except Exception:
 bias  = ctx.get("overall_market_bias", "MIXED")
 vzone = ctx.get("vix_zone", "NORMAL")
 risk  = ctx.get("overall_risk_rating", "MEDIUM")
-t_ok  = ctx.get("trading_recommended", True)
+# trading_recommended is updated post-gate — use the value from the (possibly updated) context
+t_ok  = brief.get("market_context", {}).get("trading_recommended", True)
 analysis_time = brief.get("analysis_time", "08:00 IST")
 date_raw = brief.get("date", TODAY_STR)
 try:
@@ -563,6 +564,28 @@ if any(t.get("expiry_day_warning") for t in brief.get("trades", [])):
         unsafe_allow_html=True,
     )
 
+# Post-gate recommendation status banner (shown when gates have been applied)
+_gs              = brief.get("_gate_summary", {})
+_final_status    = _gs.get("final_recommendation_status", "")
+_post_gate_note  = brief.get("post_gate_summary", "")
+_total_actionable = _gs.get("total_actionable", len(brief.get("trades", [])))
+
+if brief.get("_gates_applied") and _final_status:
+    if _final_status == "ACTIONABLE_TRADES_AVAILABLE":
+        _pg_bg, _pg_border, _pg_label = "#001500", C["success"], "[GATES PASSED]"
+    elif _final_status == "DATA_INSUFFICIENT":
+        _pg_bg, _pg_border, _pg_label = "#1a0800", C["red"], "[DATA INSUFFICIENT]"
+    else:
+        _pg_bg, _pg_border, _pg_label = "#1a0800", C["amber"], "[NO ACTIONABLE TRADE]"
+    st.markdown(
+        f'<div style="background:{_pg_bg};border-left:4px solid {_pg_border};'
+        f'padding:12px 16px;font-family:monospace;font-size:14px;line-height:1.8;'
+        f'color:#ffffff;margin:6px 0">'
+        f'<span style="color:{_pg_border};font-weight:700">{_pg_label} </span>'
+        f'{_post_gate_note}</div>',
+        unsafe_allow_html=True,
+    )
+
 st.markdown("---")
 
 # ---------------------------------------------------------------------------
@@ -595,9 +618,17 @@ mc[4].metric("CRUDE WTI",
              delta=f"{crude_pct:+.2f}%" if crude_pct else None,
              delta_color="inverse")
 mc[5].metric("GLOBAL SCORE", f"{g_score:+.0f} / +3" if isinstance(g_score, (int,float)) else str(g_score))
+_fii_dii_raw    = meta.get("fii_dii", {})
+_fii_unavailable = (
+    _fii_dii_raw.get("fii_net_buy") == 0.0
+    and _fii_dii_raw.get("dii_net_buy") == 0.0
+)
 mc[6].metric("FII NET (Cr)",
-             f"₹{fii_net:+,.0f}" if isinstance(fii_net, (int,float)) else "—",
-             delta_color="normal" if isinstance(fii_net, (int,float)) and fii_net >= 0 else "inverse")
+             "Unavailable" if _fii_unavailable else (
+                 f"₹{fii_net:+,.0f}" if isinstance(fii_net, (int,float)) else "—"
+             ),
+             delta="pre-market zero" if _fii_unavailable else None,
+             delta_color="off")
 
 st.markdown("---")
 
@@ -836,7 +867,7 @@ with st.expander(_intraday_label):
 
         # Today's analysis coverage
         _today_syms  = _da.get("intraday_symbols", [])
-        _active_syms = [t.get("symbol","") for t in trades_all]
+        _active_syms = [t.get("symbol","") for t in _all_actionable]
         if _active_syms:
             _cov_html = "".join(
                 f'<div style="font-size:12px;font-family:monospace;padding:2px 0">'
@@ -870,7 +901,10 @@ INVERT_LABELS = {"Crude Oil WTI", "USD/INR"}
 cue_list = [(lbl, d) for lbl, d in cues.items()
             if isinstance(d, dict) and d.get("last") is not None]
 
-trades_all = brief.get("trades", [])
+trades_all    = brief.get("trades", [])
+stock_trades  = brief.get("stock_trades", [])
+# Combined list of all actionable trades — used for intraday coverage checks
+_all_actionable = trades_all + stock_trades
 
 if cue_list:
     st.markdown(_section_header("GLOBAL INTELLIGENCE"), unsafe_allow_html=True)
@@ -1114,7 +1148,7 @@ else:
 # ---------------------------------------------------------------------------
 
 STOCK_BLUE = "#40c4ff"
-stock_trades = brief.get("stock_trades", [])
+# stock_trades already loaded above alongside trades_all
 
 st.markdown("---")
 st.markdown(_section_header("STOCK SIGNALS (F&O UNIVERSE)"), unsafe_allow_html=True)
@@ -1234,18 +1268,19 @@ if filtered:
 # BLOCKED TRADES — gated out by deterministic validation rules
 # ---------------------------------------------------------------------------
 
-_gated_out = brief.get("trades_gated_out", [])
-_gate_summary = brief.get("_gate_summary", {})
+_gated_out       = brief.get("trades_gated_out", [])
+_stock_gated_out = brief.get("stock_trades_gated_out", [])
+_gate_summary    = brief.get("_gate_summary", {})
+_all_gated       = _gated_out + _stock_gated_out
 
-if _gated_out:
+if _all_gated:
     st.markdown(_section_header("BLOCKED TRADES — GATED OUT"), unsafe_allow_html=True)
 
-    _gs_allowed = _gate_summary.get("allowed", len(trades_all))
-    _gs_blocked = _gate_summary.get("blocked", len(_gated_out))
-    _gs_penalty = _gate_summary.get("data_penalty", 0)
+    _gs_total_blocked = _gate_summary.get("blocked", 0) + _gate_summary.get("stock_blocked", 0)
+    _gs_penalty       = _gate_summary.get("data_penalty", 0)
     st.markdown(
         f'<div style="font-family:monospace;font-size:13px;color:{C["amber"]};margin-bottom:8px">'
-        f'{_gs_blocked} trade(s) blocked by validation gates before recommendation. '
+        f'{_gs_total_blocked} trade(s) blocked by validation gates. '
         f'Data quality penalty applied: {_gs_penalty:.1f} pts off confidence.</div>',
         unsafe_allow_html=True,
     )
@@ -1255,10 +1290,11 @@ if _gated_out:
         "DATA_INSUFFICIENT":   "#ff9800",
         "NO_TRADE":            C["amber"],
     }
-    for _gt in _gated_out:
+    for _gt in _all_gated:
         _gs_color = _GATE_STATUS_COLORS.get(_gt.get("gate_status",""), C["neutral"])
         _gs_sig   = _gt.get("signal","?")
         _gs_sig_c = SIG_COLOR.get(_gs_sig, C["neutral"])
+        _is_stock = _gt in _stock_gated_out
         st.markdown(
             f'<div style="background:{C["card"]};border:1px solid {_gs_color}44;'
             f'border-left:4px solid {_gs_color};border-radius:4px;'
@@ -1268,6 +1304,7 @@ if _gated_out:
         st.markdown(
             _badge(_gt.get("symbol","?"), "#1a2e1a", 13)
             + _badge(_gs_sig, _gs_sig_c, 13)
+            + (_badge("STOCK F&O", STOCK_BLUE, 12) if _is_stock else "")
             + _badge(_gt.get("gate_status","?"), _gs_color, 13)
             + f'<span style="font-size:12px;color:{C["text2"]};font-family:monospace;margin-left:8px">'
             f'ORIGINAL CONF: {_gt.get("gate_original_confidence","?")} → '
@@ -1283,7 +1320,7 @@ if _gated_out:
             )
         st.markdown("</div>", unsafe_allow_html=True)
 
-elif brief.get("_gates_applied") and not trades_all and not _gated_out:
+elif brief.get("_gates_applied") and not trades_all and not _all_gated:
     st.markdown(
         f'<div style="background:#180800;border-left:3px solid {C["amber"]};'
         f'padding:12px 16px;font-family:monospace;font-size:14px;color:#ffffff;margin:4px 0">'
@@ -1292,6 +1329,34 @@ elif brief.get("_gates_applied") and not trades_all and not _gated_out:
         f'missing layers={_gate_summary.get("missing_layers",[])}</div>',
         unsafe_allow_html=True,
     )
+
+# WATCHLIST ONLY — valid trades capped by max_trades_recommended
+_watchlist_only = brief.get("watchlist_only", [])
+if _watchlist_only:
+    st.markdown(_section_header("WATCHLIST — CAPPED VALID IDEAS"), unsafe_allow_html=True)
+    st.markdown(
+        f'<div style="font-family:monospace;font-size:13px;color:{C["neutral"]};margin-bottom:8px">'
+        f'These trades passed all gates but exceed today\'s max_trades_recommended limit. '
+        f'Monitor only — do not execute without reviewing the full brief.</div>',
+        unsafe_allow_html=True,
+    )
+    for _wt in _watchlist_only:
+        _wt_sig   = _wt.get("signal","?")
+        _wt_sig_c = SIG_COLOR.get(_wt_sig, STOCK_BLUE)
+        _wt_conf  = _wt.get("confidence", 0)
+        st.markdown(
+            f'<div style="background:{C["card"]};border:1px solid {C["border"]};'
+            f'border-left:4px solid {C["neutral"]};border-radius:4px;'
+            f'padding:10px 16px;margin:4px 0">'
+            + _badge(_wt.get("symbol","?"), "#1a2e1a", 13)
+            + _badge(_wt_sig, _wt_sig_c, 13)
+            + _badge("WATCHLIST", C["neutral"], 12)
+            + f'<span style="font-size:12px;color:{C["text2"]};font-family:monospace;margin-left:8px">'
+            f'CONF: {_wt_conf} | '
+            f'Capped by daily trade limit — review before acting</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
 st.markdown("---")
 
@@ -1644,14 +1709,30 @@ else:
 # MORNING SUMMARY
 # ---------------------------------------------------------------------------
 
-summary = brief.get("morning_summary", "")
-if summary:
+summary           = brief.get("morning_summary", "")
+post_gate_summary = brief.get("post_gate_summary", "")
+_trading_ok       = brief.get("market_context", {}).get("trading_recommended", True)
+
+if summary or post_gate_summary:
     st.markdown("---")
-    st.markdown(
-        f'<div style="background:{C["card"]};border:1px solid {C["border"]};'
-        f'border-left:3px solid {C["green"]};padding:16px;'
-        f'font-family:monospace;font-size:15px;color:{C["text2"]};line-height:1.9">'
-        f'<span style="color:{C["green"]};font-weight:700;letter-spacing:1px">'
-        f'[MORNING BRIEF] </span>{summary}</div>',
-        unsafe_allow_html=True,
-    )
+    # Show post-gate summary prominently when trades were blocked
+    if post_gate_summary and not _trading_ok:
+        st.markdown(
+            f'<div style="background:#1a0800;border:1px solid {C["amber"]}44;'
+            f'border-left:3px solid {C["amber"]};padding:16px;'
+            f'font-family:monospace;font-size:15px;color:{C["text2"]};line-height:1.9;margin-bottom:6px">'
+            f'<span style="color:{C["amber"]};font-weight:700;letter-spacing:1px">'
+            f'[POST-GATE STATUS] </span>{post_gate_summary}</div>',
+            unsafe_allow_html=True,
+        )
+    if summary:
+        _sum_label   = "[CLAUDE ANALYSIS — PRE-GATE]" if post_gate_summary and not _trading_ok else "[MORNING BRIEF]"
+        _sum_border  = C["neutral"] if (post_gate_summary and not _trading_ok) else C["green"]
+        st.markdown(
+            f'<div style="background:{C["card"]};border:1px solid {C["border"]};'
+            f'border-left:3px solid {_sum_border};padding:16px;'
+            f'font-family:monospace;font-size:15px;color:{C["text2"]};line-height:1.9">'
+            f'<span style="color:{_sum_border};font-weight:700;letter-spacing:1px">'
+            f'{_sum_label} </span>{summary}</div>',
+            unsafe_allow_html=True,
+        )

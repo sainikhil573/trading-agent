@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.analyzers.trade_gates import (
     gate_trade,
+    gate_stock_trade,
     apply_trade_gates,
     check_pcr_conflict,
     check_max_pain_conflict,
@@ -315,3 +316,199 @@ class TestApplyTradeGates:
         brief  = self._make_brief([_trade(confidence=9.0)])
         result = apply_trade_gates(brief, dq, _nifty_sig(), _bn_sig())
         assert result["_gate_summary"]["data_penalty"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# gate_stock_trade — simplified gate for stock F&O trades
+# ---------------------------------------------------------------------------
+
+class TestGateStockTrade:
+    def test_stock_trade_allowed_with_clean_data(self):
+        """Stock trade passes gates when data is complete and confidence is high."""
+        trade = {"symbol": "BAJFINANCE", "signal": "PUT", "confidence": 8.0}
+        gated = gate_stock_trade(trade, _dq())
+        assert gated["gate_status"] == "TRADE_ALLOWED"
+        assert gated["gate_effective_confidence"] == 8.0
+        assert gated["gate_data_penalty"] == 0.0
+
+    def test_stock_trade_gated_when_data_penalty_drops_below_floor(self):
+        """Confidence 7.3 − 1.0 (FII+OI penalty) = 6.3 < 7.0 → NO_TRADE."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"])
+        trade = {"symbol": "HDFCBANK", "signal": "PUT", "confidence": 7.3}
+        gated = gate_stock_trade(trade, dq)
+        assert gated["gate_status"] == "NO_TRADE"
+        assert gated["gate_effective_confidence"] == pytest.approx(6.3)
+        assert gated["gate_data_penalty"] == 1.0
+
+    def test_stock_trade_survives_high_confidence_with_penalty(self):
+        """Confidence 8.5 − 1.0 = 7.5 ≥ 7.0 → TRADE_ALLOWED even with full penalty."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"])
+        trade = {"symbol": "RELIANCE", "signal": "CALL", "confidence": 8.5}
+        gated = gate_stock_trade(trade, dq)
+        assert gated["gate_status"] == "TRADE_ALLOWED"
+        assert gated["gate_effective_confidence"] == pytest.approx(7.5)
+
+    def test_stock_trade_partial_penalty(self):
+        """Only FII/DII missing → −0.5 penalty applied."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO"])
+        trade = {"symbol": "TCS", "signal": "CALL", "confidence": 7.6}
+        gated = gate_stock_trade(trade, dq)
+        assert gated["gate_data_penalty"] == 0.5
+        assert gated["gate_effective_confidence"] == pytest.approx(7.1)
+        assert gated["gate_status"] == "TRADE_ALLOWED"
+
+    def test_stock_gate_preserves_original_fields(self):
+        """gate_stock_trade must not drop existing trade fields."""
+        trade = {"symbol": "INFY", "signal": "PUT", "confidence": 8.0,
+                 "entry_price": 25.0, "trigger": "EMA bear trend"}
+        gated = gate_stock_trade(trade, _dq())
+        assert gated["entry_price"] == 25.0
+        assert gated["trigger"] == "EMA bear trend"
+        assert gated["gate_original_confidence"] == 8.0
+
+
+# ---------------------------------------------------------------------------
+# Post-gate output consistency — the primary focus of this branch
+# ---------------------------------------------------------------------------
+
+def _stock_trade(symbol="BAJFINANCE", signal="PUT", confidence=7.5):
+    return {"symbol": symbol, "signal": signal, "confidence": confidence}
+
+
+class TestPostGateConsistency:
+    def _brief(self, trades=None, stock_trades=None, max_trades=2):
+        return {
+            "trades": trades or [],
+            "stock_trades": stock_trades or [],
+            "max_trades_recommended": max_trades,
+            "market_context": {"trading_recommended": True, "overall_market_bias": "MIXED"},
+            "morning_summary": "Claude pre-gate summary with BankNifty PUT as primary trade.",
+        }
+
+    def test_allowed_zero_sets_trading_recommended_false(self):
+        """When all trades are blocked, trading_recommended must flip to False."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"],
+                    missing_layers=["FII", "OI"])
+        brief = self._brief(trades=[_trade(confidence=7.2)], stock_trades=[_stock_trade(confidence=7.0)])
+        result = apply_trade_gates(brief, dq, _nifty_sig(), _bn_sig())
+        assert result["market_context"]["trading_recommended"] is False
+
+    def test_trading_recommended_true_when_any_trade_passes(self):
+        """trading_recommended stays True when at least one trade passes."""
+        brief = self._brief(trades=[_trade(signal="CALL", confidence=9.0, vol_score=8)])
+        result = apply_trade_gates(brief, _dq(), _nifty_sig(pcr=1.0), _bn_sig())
+        assert result["market_context"]["trading_recommended"] is True
+
+    def test_blocked_index_trade_not_in_trades(self):
+        """A gated-out index trade must not appear in brief['trades']."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"],
+                    missing_layers=["FII", "OI"])
+        brief = self._brief(trades=[_trade(symbol="BANKNIFTY", signal="PUT", confidence=7.2)])
+        result = apply_trade_gates(brief, dq, _nifty_sig(), _bn_sig())
+        assert len(result["trades"]) == 0
+        assert len(result["trades_gated_out"]) == 1
+        assert result["trades_gated_out"][0]["symbol"] == "BANKNIFTY"
+
+    def test_stock_trades_go_through_gates(self):
+        """Stock trades with borderline confidence are gated when data is missing."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"])
+        brief = self._brief(stock_trades=[
+            _stock_trade("BAJFINANCE", confidence=7.3),   # 7.3 − 1.0 = 6.3 → blocked
+            _stock_trade("RELIANCE",   confidence=8.5),   # 8.5 − 1.0 = 7.5 → allowed
+        ])
+        result = apply_trade_gates(brief, dq, _nifty_sig(), _bn_sig())
+        stock_syms = [t["symbol"] for t in result["stock_trades"]]
+        blocked_syms = [t["symbol"] for t in result["stock_trades_gated_out"]]
+        assert "RELIANCE" in stock_syms
+        assert "BAJFINANCE" in blocked_syms
+
+    def test_max_trades_recommended_enforced_after_gating(self):
+        """When allowed stock trades exceed max_trades_recommended, excess goes to watchlist."""
+        brief = self._brief(
+            max_trades=2,
+            stock_trades=[
+                _stock_trade("BAJFINANCE", confidence=8.0),
+                _stock_trade("HDFCBANK",   confidence=7.5),
+                _stock_trade("ADANIENT",   confidence=7.2),  # exceeds cap of 2
+            ],
+        )
+        result = apply_trade_gates(brief, _dq(), _nifty_sig(), _bn_sig())
+        assert len(result["stock_trades"]) == 2
+        assert len(result["watchlist_only"]) == 1
+        assert result["watchlist_only"][0]["symbol"] == "ADANIENT"
+
+    def test_watchlist_only_separate_from_actionable(self):
+        """Watchlist items must not appear in stock_trades."""
+        brief = self._brief(
+            max_trades=1,
+            stock_trades=[
+                _stock_trade("TCS",   confidence=8.0),
+                _stock_trade("INFY",  confidence=7.5),
+            ],
+        )
+        result = apply_trade_gates(brief, _dq(), _nifty_sig(), _bn_sig())
+        actionable_syms = {t["symbol"] for t in result["stock_trades"]}
+        watchlist_syms  = {t["symbol"] for t in result["watchlist_only"]}
+        # No overlap
+        assert actionable_syms.isdisjoint(watchlist_syms)
+        assert "TCS" in actionable_syms
+        assert "INFY" in watchlist_syms
+
+    def test_post_gate_summary_reflects_no_actionable_state(self):
+        """post_gate_summary must mention blocked status when no trades pass."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"],
+                    missing_layers=["FII", "OI"])
+        brief = self._brief(trades=[_trade(confidence=7.2)])
+        result = apply_trade_gates(brief, dq, _nifty_sig(), _bn_sig())
+        summary = result.get("post_gate_summary", "")
+        assert summary != ""
+        assert "NO ACTIONABLE" in summary.upper() or "blocked" in summary.lower()
+
+    def test_final_recommendation_status_in_gate_summary(self):
+        """_gate_summary must include final_recommendation_status."""
+        brief = self._brief(trades=[_trade(signal="CALL", confidence=9.0, vol_score=8)])
+        result = apply_trade_gates(brief, _dq(), _nifty_sig(pcr=1.0), _bn_sig())
+        assert "final_recommendation_status" in result["_gate_summary"]
+        assert result["_gate_summary"]["final_recommendation_status"] == "ACTIONABLE_TRADES_AVAILABLE"
+
+    def test_final_status_no_actionable_when_all_blocked(self):
+        """final_recommendation_status must be NO_ACTIONABLE_TRADE when nothing passes."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO"])
+        brief = self._brief(trades=[_trade(confidence=7.4, vol_score=6)])
+        result = apply_trade_gates(brief, dq, _nifty_sig(), _bn_sig())
+        status = result["_gate_summary"]["final_recommendation_status"]
+        assert status in ("NO_ACTIONABLE_TRADE", "DATA_INSUFFICIENT")
+
+    def test_total_actionable_in_gate_summary(self):
+        """_gate_summary.total_actionable must equal allowed index + actionable stock."""
+        brief = self._brief(
+            max_trades=3,
+            trades=[_trade(signal="CALL", confidence=8.0, vol_score=6)],
+            stock_trades=[
+                _stock_trade("TCS",  confidence=8.0),
+                _stock_trade("INFY", confidence=7.5),
+            ],
+        )
+        result = apply_trade_gates(brief, _dq(), _nifty_sig(pcr=1.0), _bn_sig())
+        gs = result["_gate_summary"]
+        assert gs["total_actionable"] == gs["allowed"] + gs["stock_allowed"]
+
+    def test_stock_trades_gated_out_field_present(self):
+        """stock_trades_gated_out must always be present in the result."""
+        brief = self._brief(stock_trades=[_stock_trade()])
+        result = apply_trade_gates(brief, _dq(), _nifty_sig(), _bn_sig())
+        assert "stock_trades_gated_out" in result
+
+    def test_index_trade_cap_respected_before_stock_slots(self):
+        """Index allowed trades consume from max_trades before stock slots are allocated."""
+        brief = self._brief(
+            max_trades=2,
+            trades=[
+                _trade(signal="CALL", confidence=8.0, vol_score=7),
+                _trade(symbol="BANKNIFTY", signal="PUT", confidence=7.5, vol_score=6),
+            ],
+            stock_trades=[_stock_trade("BAJFINANCE", confidence=8.0)],
+        )
+        result = apply_trade_gates(brief, _dq(), _nifty_sig(pcr=1.0), _bn_sig())
+        total = result["_gate_summary"]["total_actionable"]
+        assert total <= 2
