@@ -461,6 +461,23 @@ def _fmt_block_deals(deals: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _is_fii_dii_unavailable(fii_net, dii_net) -> bool:
+    """True when both values are exactly 0.0 — NSE API pre-market zero, not actual flow."""
+    return fii_net == 0.0 and dii_net == 0.0
+
+
+def _fmt_fii_value(fii_net, dii_net) -> str:
+    if _is_fii_dii_unavailable(fii_net, dii_net):
+        return "UNAVAILABLE — pre-market zero (NSE publishes ~15:30 IST; treat institutional layer as unknown)"
+    return f"{fii_net:+.1f}" if fii_net is not None else "UNAVAILABLE"
+
+
+def _fmt_dii_value(dii_net, fii_net) -> str:
+    if _is_fii_dii_unavailable(fii_net, dii_net):
+        return "UNAVAILABLE — pre-market zero"
+    return f"{dii_net:+.1f}" if dii_net is not None else "UNAVAILABLE"
+
+
 def build_morning_prompt(
     analysis_date: str,
     nifty_signal: dict,
@@ -509,8 +526,8 @@ def build_morning_prompt(
 {_fmt_global(global_cues)}
 
 ## LAYER 2: INSTITUTIONAL FLOW
-  FII Cash Net (cr)    : {fii_dii.get('fii_net_buy', 0):+.1f}
-  DII Cash Net (cr)    : {fii_dii.get('dii_net_buy', 0):+.1f}
+  FII Cash Net (cr)    : {_fmt_fii_value(fii_dii.get('fii_net_buy'), fii_dii.get('dii_net_buy'))}
+  DII Cash Net (cr)    : {_fmt_dii_value(fii_dii.get('dii_net_buy'), fii_dii.get('fii_net_buy'))}
   Date                 : {fii_dii.get('date', 'latest available')}
 
   Participant-wise Derivatives OI:
