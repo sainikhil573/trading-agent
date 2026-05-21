@@ -379,6 +379,47 @@ src/dashboard/app.py      — Streamlit UI: morning brief, pre-open, post-market
 
 ---
 
+### 2026-05-21 | PR7 — Instrument master loader and validation | `feature/instrument-master-loader`
+
+- **Branch:** `feature/instrument-master-loader`
+- **Files changed:** `src/fetchers/instrument_master.py` (ValidationReport, CoverageReport,
+  from_dataframe, validate, coverage_report, normalize_kite_native_df,
+  normalize_angelone_native_df, load_best_available_master, source_name property),
+  `src/fetchers/data_availability.py` (instrument_master_info extended with source_name,
+  validation, coverage fields), `src/dashboard/app.py` (IM COVERAGE, EXPIRED OPTIONS,
+  IM VALIDATION dashboard sections), `scripts/check_instrument_master.py` (new CLI tool),
+  `data/instruments/schema_example.csv` (column alignment fix),
+  `docs/instrument_master.md` (full rewrite with setup options and CLI docs),
+  `tests/test_instrument_master.py` (62 new tests, 103 total), `docs/project_status.md` (this entry).
+- **Feature added:**
+  - `ValidationReport` dataclass + `InstrumentMaster.validate()`: separates structural
+    errors (bad option rows, unsupported provider) from data-quality warnings (missing tokens,
+    expired contracts). Caps at 20 errors and 20 warnings.
+  - `CoverageReport` dataclass + `InstrumentMaster.coverage_report(provider)`: counts by
+    instrument_type and exchange; flags per-symbol token readiness for indices and F&O stocks.
+  - `Instrument.is_expired()`: checks expiry date against a reference date.
+  - `InstrumentMaster.from_dataframe(df, source_name)`: factory for in-memory canonical DataFrames.
+  - `normalize_kite_native_df(df)`: maps Kite native format to canonical schema;
+    handles INDICES segment → INDEX, FUT+index → FUTIDX, CE/PE → OPTIDX/OPTSTK.
+  - `normalize_angelone_native_df(df)`: maps Angel One scrip master to canonical schema;
+    handles `symboltoken` alias, `29MAY2026` expiry format, `-EQ` suffix stripping.
+  - `load_best_available_master(dir)`: priority 1=canonical CSV, 2=native files auto-normalised, 3=not-loaded.
+  - `source_name` property: filename for file-loaded masters, custom string for from_dataframe.
+  - `scripts/check_instrument_master.py`: standalone CLI (no Streamlit) with validate/convert
+    modes; ANSI coloured output; flags `--file`, `--kite-file`, `--angelone-file`, `--output`,
+    `--provider`, `--verbose`, `--no-color`; exit codes 0/1/2.
+  - Dashboard extended with `[IM COVERAGE]`, `[EXPIRED OPTIONS]`, `[IM VALIDATION]` sections;
+    NOT-loaded state now shows 3 file path options + CLI hint.
+  - `data_availability` instrument_master_info now includes `source_name`, `validation`, `coverage`.
+- **Tests/checks:** 307 passed, 2 skipped. 62 new tests covering ValidationReport,
+  CoverageReport, is_expired, from_dataframe, normalize_kite, normalize_angelone,
+  load_best_available_master, source_name, CLI script, data_availability integration.
+- **Remaining limitations:** instrument_master.csv must be supplied by user; option tokens
+  expire weekly; live `_fetch()` not yet implemented.
+- **Next step:** Phase 5 — wire live `_fetch()` in AngelOne/Kite providers.
+
+---
+
 ### 2026-05-21 | PR6 — Instrument master token mapping | `feature/instrument-master-token-mapping`
 
 - **Branch:** `feature/instrument-master-token-mapping`

@@ -741,17 +741,22 @@ st.markdown(
 )
 
 # Instrument master status
-_im = _da.get("instrument_master", {})
-_im_loaded = _im.get("loaded", False)
-_im_count  = _im.get("record_count", 0)
-_im_error  = _im.get("error", "")
-_im_path   = _im.get("path", "data/instruments/instrument_master.csv")
-_im_color  = C["success"] if _im_loaded else C["amber"]
-_im_label  = (
-    f"Instrument master loaded: {_im_count} records from {Path(_im_path).name}"
+_im         = _da.get("instrument_master", {})
+_im_loaded  = _im.get("loaded", False)
+_im_count   = _im.get("record_count", 0)
+_im_src     = _im.get("source_name") or Path(_im.get("path", "instrument_master.csv")).name
+_im_path    = _im.get("path", "data/instruments/instrument_master.csv")
+_im_color   = C["success"] if _im_loaded else C["amber"]
+_im_label   = (
+    f"Loaded {_im_count} records from {_im_src}"
     if _im_loaded else
-    f"Instrument master NOT loaded — place broker token CSV at {_im_path} "
-    "(see docs/instrument_master.md). Broker API candle fetch will return empty until loaded."
+    (
+        "NOT loaded — "
+        + "place data/instruments/instrument_master.csv (canonical) "
+        + "or data/instruments/kite_instruments.csv / angelone_instruments.csv (native). "
+        + "Run: python scripts/check_instrument_master.py   "
+        + "See docs/instrument_master.md."
+    )
 )
 st.markdown(
     f'<div style="background:{C["card"]};border-left:3px solid {_im_color};'
@@ -760,22 +765,89 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Token readiness for active provider (only shown when master is loaded)
+# Token readiness and coverage (only when master is loaded)
 if _im_loaded:
-    _tok_ready = _im.get("token_readiness", {})
-    _tok_parts = []
-    for _sym, _ok in _tok_ready.items():
-        _c = C["success"] if _ok else C["amber"]
-        _tok_parts.append(
-            f'<span style="color:{_c}">{_sym}:{"✓" if _ok else "missing"}</span>'
-        )
-    if _tok_parts:
+    _cov = _im.get("coverage")   # CoverageReport | None
+
+    # Build token readiness display from coverage (index + equity) or fallback to token_readiness
+    if _cov is not None:
+        _index_parts = []
+        for _sym, _ok in _cov.index_ready.items():
+            _c = C["success"] if _ok else C["amber"]
+            _index_parts.append(f'<span style="color:{_c}">{_sym}:{"✓" if _ok else "✗"}</span>')
+
+        _eq_parts = []
+        for _sym, _ok in list(_cov.equity_ready.items())[:6]:  # show up to 6 stocks
+            _c = C["success"] if _ok else C["neutral"]
+            _eq_parts.append(f'<span style="color:{_c}">{_sym}:{"✓" if _ok else "—"}</span>')
+
+        _all_parts = _index_parts + _eq_parts
+        if _all_parts:
+            st.markdown(
+                f'<div style="background:{C["card"]};border-left:3px solid {C["neutral"]};'
+                f'padding:7px 14px;font-family:monospace;font-size:12px;color:{C["text2"]};margin:2px 0">'
+                f'<span style="color:{C["neutral"]};font-weight:700">[TOKEN READINESS] </span>'
+                f'{_prov_name} — ' + "  ".join(_all_parts) + "</div>",
+                unsafe_allow_html=True,
+            )
+
+        # Coverage breakdown
+        if _cov.by_type:
+            _type_summary = "  ".join(f"{k}:{v}" for k, v in sorted(_cov.by_type.items()))
+            st.markdown(
+                f'<div style="background:{C["card"]};border-left:3px solid {C["neutral"]};'
+                f'padding:7px 14px;font-family:monospace;font-size:12px;color:{C["text2"]};margin:2px 0">'
+                f'<span style="color:{C["neutral"]};font-weight:700">[IM COVERAGE] </span>'
+                f'{_cov.total_count} rows for {_prov_name}  — {_type_summary}</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Expired option warnings
+        if _cov.expired_option_symbols:
+            _exp_names = ", ".join(_cov.expired_option_symbols[:4])
+            if len(_cov.expired_option_symbols) > 4:
+                _exp_names += f" +{len(_cov.expired_option_symbols) - 4} more"
+            st.markdown(
+                f'<div style="background:#180e00;border-left:3px solid {C["amber"]};'
+                f'padding:7px 14px;font-family:monospace;font-size:12px;color:#ffffff;margin:2px 0">'
+                f'<span style="color:{C["amber"]};font-weight:700">[EXPIRED OPTIONS] </span>'
+                f'{len(_cov.expired_option_symbols)} expired contract(s) in instrument master: {_exp_names}. '
+                f'Refresh master before next expiry.</div>',
+                unsafe_allow_html=True,
+            )
+    else:
+        # Fallback: simple token_readiness dict
+        _tok_ready = _im.get("token_readiness", {})
+        _tok_parts = []
+        for _sym, _ok in _tok_ready.items():
+            _c = C["success"] if _ok else C["amber"]
+            _tok_parts.append(f'<span style="color:{_c}">{_sym}:{"✓" if _ok else "missing"}</span>')
+        if _tok_parts:
+            st.markdown(
+                f'<div style="background:{C["card"]};border-left:3px solid {C["neutral"]};'
+                f'padding:7px 14px;font-family:monospace;font-size:12px;color:{C["text2"]};margin:2px 0">'
+                f'<span style="color:{C["neutral"]};font-weight:700">[TOKEN READINESS] </span>'
+                f'Provider: {_prov_name} — ' + "  ".join(_tok_parts) + "</div>",
+                unsafe_allow_html=True,
+            )
+
+    # Validation issues (only if there are errors or stale/missing-token warnings)
+    _val = _im.get("validation")
+    if _val is not None and (_val.has_errors or _val.missing_token_rows or _val.expired_option_count):
+        _val_color = C["red"] if _val.has_errors else C["amber"]
+        _val_parts = []
+        if _val.has_errors:
+            _val_parts.append(f'{len(_val.errors)} error(s)')
+        if _val.missing_token_rows:
+            _val_parts.append(f'{_val.missing_token_rows} missing token(s)')
+        if _val.expired_option_count:
+            _val_parts.append(f'{_val.expired_option_count} expired option(s)')
         st.markdown(
-            f'<div style="background:{C["card"]};border-left:3px solid {C["neutral"]};'
+            f'<div style="background:{C["card"]};border-left:3px solid {_val_color};'
             f'padding:7px 14px;font-family:monospace;font-size:12px;color:{C["text2"]};margin:2px 0">'
-            f'<span style="color:{C["neutral"]};font-weight:700">[TOKEN READINESS] </span>'
-            f'Provider: {_prov_name} — '
-            + "  ".join(_tok_parts) + "</div>",
+            f'<span style="color:{_val_color};font-weight:700">[IM VALIDATION] </span>'
+            + "  •  ".join(_val_parts)
+            + "  — run: python scripts/check_instrument_master.py --verbose</div>",
             unsafe_allow_html=True,
         )
 
