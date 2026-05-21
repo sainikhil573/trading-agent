@@ -13,6 +13,14 @@ Core stack:
 - JSON outputs in data/processed
 - Main pipeline starts from main.py
 
+Project status file:
+- Before starting any task, read docs/project_status.md first.
+- Do not re-audit the full repository unless explicitly asked.
+- Inspect only files relevant to the current task.
+- After every meaningful feature or change, update docs/project_status.md:
+  Current Stage, Completed Phases, Known Limitations, Next Recommended Phases, and Change Log.
+- Keep docs/project_status.md concise. Do not turn it into a long report.
+
 Important rules:
 - Use minimal context and minimal output.
 - Inspect only files relevant to the current task.
