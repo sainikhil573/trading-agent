@@ -1,0 +1,34 @@
+{
+  "_note": "NSE F&O universe — lot sizes per NSE circular. Expiry: last Thursday of month. Strike step varies by stock price band.",
+  "_updated": "2026-05-22",
+  "_backtest_note": "30-day rule-based backtest is diagnostic only — not statistically conclusive. Sample sizes too small for permanent pruning decisions.",
+  "_backtest_date": "2026-05-22",
+  "stocks": [
+    {"symbol": "RELIANCE",   "lot_size": 250,  "tick_size": 0.05, "strike_step": 50,  "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"},
+    {"symbol": "TCS",        "lot_size": 150,  "tick_size": 0.05, "strike_step": 100, "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"},
+    {"symbol": "INFY",       "lot_size": 300,  "tick_size": 0.05, "strike_step": 20,  "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"},
+    {"symbol": "HDFCBANK",   "lot_size": 550,  "tick_size": 0.05, "strike_step": 20,  "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"},
+    {"symbol": "ICICIBANK",  "lot_size": 700,  "tick_size": 0.05, "strike_step": 20,  "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"},
+    {"symbol": "AXISBANK",   "lot_size": 625,  "tick_size": 0.05, "strike_step": 20,  "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"},
+    {"symbol": "KOTAKBANK",  "lot_size": 400,  "tick_size": 0.05, "strike_step": 50,  "exchange": "NSE", "segment": "FO", "backtest_tier": "PRIMARY_CANDIDATE"},
+    {"symbol": "SBIN",       "lot_size": 1500, "tick_size": 0.05, "strike_step": 10,  "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"},
+    {"symbol": "TATASTEEL",  "lot_size": 5500, "tick_size": 0.05, "strike_step": 5,   "exchange": "NSE", "segment": "FO", "backtest_tier": "SECONDARY_CANDIDATE"},
+    {"symbol": "HINDALCO",   "lot_size": 2150, "tick_size": 0.05, "strike_step": 10,  "exchange": "NSE", "segment": "FO", "backtest_tier": "PRIMARY_CANDIDATE"},
+    {"symbol": "ONGC",       "lot_size": 3850, "tick_size": 0.05, "strike_step": 5,   "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"},
+    {"symbol": "BPCL",       "lot_size": 4500, "tick_size": 0.05, "strike_step": 10,  "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"},
+    {"symbol": "MARUTI",     "lot_size": 50,   "tick_size": 0.05, "strike_step": 200, "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"},
+    {"symbol": "BAJFINANCE", "lot_size": 125,  "tick_size": 0.05, "strike_step": 100, "exchange": "NSE", "segment": "FO", "backtest_tier": "SECONDARY_CANDIDATE"},
+    {"symbol": "TATAMOTORS", "lot_size": 2850, "tick_size": 0.05, "strike_step": 5,   "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"},
+    {"symbol": "WIPRO",      "lot_size": 1500, "tick_size": 0.05, "strike_step": 5,   "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"},
+    {"symbol": "SUNPHARMA",  "lot_size": 700,  "tick_size": 0.05, "strike_step": 20,  "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"},
+    {"symbol": "DRREDDY",    "lot_size": 125,  "tick_size": 0.05, "strike_step": 100, "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"},
+    {"symbol": "ADANIENT",   "lot_size": 625,  "tick_size": 0.05, "strike_step": 50,  "exchange": "NSE", "segment": "FO", "backtest_tier": "PRIMARY_CANDIDATE"},
+    {"symbol": "LT",         "lot_size": 375,  "tick_size": 0.05, "strike_step": 50,  "exchange": "NSE", "segment": "FO", "backtest_tier": "WATCHLIST_REVIEW"}
+  ],
+  "indices": [
+    {"symbol": "NIFTY",     "lot_size": 75,  "tick_size": 0.05, "strike_step": 50,  "exchange": "NSE", "segment": "FO",
+     "expiry_cycle": "weekly+monthly", "weekly_expiry_day": "Thursday", "backtest_tier": "PRIMARY_CANDIDATE"},
+    {"symbol": "BANKNIFTY", "lot_size": 35,  "tick_size": 0.05, "strike_step": 100, "exchange": "NSE", "segment": "FO",
+     "expiry_cycle": "weekly+monthly", "weekly_expiry_day": "Wednesday", "backtest_tier": "PRIMARY_CANDIDATE"}
+  ]
+}

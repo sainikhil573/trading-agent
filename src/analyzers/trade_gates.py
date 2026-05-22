@@ -32,11 +32,16 @@ Top-level fields added to brief:
 from __future__ import annotations
 
 CONFIDENCE_FLOOR    = 7.0   # minimum confidence to recommend a trade
-VOLUME_SCORE_MIN    = 5     # below this → cap confidence
+VOLUME_SCORE_MIN    = 3     # below this → cap confidence (0.3 Vol/Avg is acceptable)
 VOLUME_CAP          = 6.8   # cap applied when volume_confirmation < VOLUME_SCORE_MIN
 PCR_BULL_THRESHOLD  = 1.3   # PCR >= this → contrarian bullish; blocks PUT signals
 PCR_BEAR_THRESHOLD  = 0.6   # PCR <= this → contrarian bearish; blocks CALL signals
 MAX_PAIN_BLOCK_GAP  = 1000  # pts; gap > this AND opposing direction → hard block
+
+# Penalty per missing data layer, by run context
+_PENALTY_FALLBACK   = 0.2   # data present but from previous day cache
+_PENALTY_PREMARKET  = 0.3   # data truly missing but timing is pre-market (expected)
+_PENALTY_POSTMARKET = 0.7   # data truly missing in post-market (should be available)
 
 
 # ---------------------------------------------------------------------------
@@ -114,19 +119,58 @@ def check_max_pain_conflict(trade: dict, nifty_sig: dict, bn_sig: dict) -> tuple
 
 
 def _data_quality_penalty(data_quality: dict) -> tuple[float, list[str]]:
-    """Returns (penalty_amount, [reason_strings]) for soft confidence reduction."""
+    """
+    Returns (penalty_amount, [reason_strings]) for soft confidence reduction.
+
+    Penalty per layer:
+      - Fallback data (prev-day cache): -0.2  (data present, just stale)
+      - Pre-market, truly missing:      -0.3  (timing issue, expected)
+      - Post-market, truly missing:     -0.7  (should be published by now)
+    Maximum total penalty capped at 0.6 to prevent over-blocking.
+    """
     penalty = 0.0
     reasons = []
     flags   = data_quality.get("flags", [])
+    is_pre  = data_quality.get("is_premarket", True)
+    is_fallback = data_quality.get("has_fallback_data", False)
 
-    if "FII_DII_DATA_ZERO" in flags:
-        penalty += 0.5
-        reasons.append("FII/DII cash data zero (institutional layer 20% weight) → -0.5 confidence")
-    if "PARTICIPANT_OI_MISSING" in flags:
-        penalty += 0.5
-        reasons.append("Participant OI unavailable (smart money unconfirmed) → -0.5 confidence")
+    # Per-layer penalty rate
+    if is_fallback:
+        rate = _PENALTY_FALLBACK
+        tag  = "fallback cache"
+    elif is_pre:
+        rate = _PENALTY_PREMARKET
+        tag  = "pre-market timing"
+    else:
+        rate = _PENALTY_POSTMARKET
+        tag  = "missing post-market"
 
-    return penalty, reasons
+    if "FII_DII_DATA_ZERO" in flags or "FII_DII_PREV_DAY" in flags:
+        layer_rate = _PENALTY_FALLBACK if "FII_DII_PREV_DAY" in flags else rate
+        penalty += layer_rate
+        reasons.append(
+            f"FII/DII {'prev-day fallback' if 'FII_DII_PREV_DAY' in flags else 'unavailable'} "
+            f"(institutional 20% weight) → -{layer_rate} confidence"
+        )
+
+    if "PARTICIPANT_OI_MISSING" in flags or "PARTICIPANT_OI_CACHED" in flags:
+        layer_rate = _PENALTY_FALLBACK if "PARTICIPANT_OI_CACHED" in flags else rate
+        penalty += layer_rate
+        reasons.append(
+            f"Participant OI {'cached fallback' if 'PARTICIPANT_OI_CACHED' in flags else 'unavailable'} "
+            f"(smart money ~10% weight) → -{layer_rate} confidence"
+        )
+
+    # Hard cap: pre-market max -0.3 total (timing issue, not data failure)
+    # Post-market max -0.7 total, fallback max -0.2 total
+    if is_fallback:
+        cap = 0.2
+    elif is_pre:
+        cap = 0.3
+    else:
+        cap = 0.7
+    penalty = min(penalty, cap)
+    return round(penalty, 2), reasons
 
 
 def check_volume_gate(trade: dict) -> tuple[bool, float]:
@@ -157,14 +201,9 @@ def gate_trade(
     gate_status    = "TRADE_ALLOWED"
     gate_reasons: list[str] = []
 
-    # --- Gate 1: DATA_INSUFFICIENT (hard block, both critical layers missing) ---
-    missing = data_quality.get("missing_layers", [])
-    if len(missing) >= 2:
-        gate_status = "DATA_INSUFFICIENT"
-        gate_reasons.append(
-            f"Both critical data layers unavailable: {' | '.join(missing)}. "
-            f"Institutional weight (≥40%) unverifiable — trade blocked."
-        )
+    # Gate 1 (DATA_INSUFFICIENT hard block) removed — replaced by soft penalty only.
+    # Pre-market data absence is a timing issue, not a signal failure.
+    # Penalty is applied in Gate 4 and capped at 0.3 (pre-market) / 0.7 (post-market).
 
     # --- Gate 2: PCR conflict (hard block) ---
     if gate_status == "TRADE_ALLOWED":

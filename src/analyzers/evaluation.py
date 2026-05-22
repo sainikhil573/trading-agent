@@ -166,21 +166,42 @@ def check_entry_trigger_met(
     return {"met": None, "trigger_level": None, "reason": "Unknown signal type"}
 
 
-def derive_data_quality(meta: dict, ctx: dict) -> dict:
+def derive_data_quality(meta: dict, ctx: dict, is_premarket: bool = True) -> dict:
     """
     Derive data quality flags from stored brief meta and market_context.
     Works on existing briefs without needing re-fetch.
+
+    is_premarket: True for 8 AM / 9 AM runs; False for 3:30 PM post-market.
+    Affects penalty severity in trade_gates._data_quality_penalty().
     """
     flags    = []
     warnings = []
 
     fii = meta.get("fii_dii", {})
-    if fii.get("fii_net_buy") == 0.0 and fii.get("dii_net_buy") == 0.0:
+    fii_is_prev_day = bool(fii.get("is_prev_day"))
+
+    if fii_is_prev_day:
+        flags.append("FII_DII_PREV_DAY")
+        warnings.append(
+            f"FII/DII using previous day data ({fii.get('fallback_date', '?')}) — "
+            f"today's data not yet published (FII=%.0f Cr, DII=%.0f Cr)" % (
+                fii.get("fii_net_buy", 0), fii.get("dii_net_buy", 0)
+            )
+        )
+    elif fii.get("fii_net_buy") == 0.0 and fii.get("dii_net_buy") == 0.0:
         flags.append("FII_DII_DATA_ZERO")
         warnings.append("FII/DII cash flow = 0 — Institutional Flow layer (20% weight) likely missing")
 
+    poi = meta.get("participant_oi", {})
+    poi_is_cached = bool(poi.get("is_cached"))
     smart_dir = str(ctx.get("smart_money_direction", ""))
-    if "unavailable" in smart_dir.lower() or "cannot" in smart_dir.lower():
+    if poi_is_cached:
+        flags.append("PARTICIPANT_OI_CACHED")
+        warnings.append(
+            f"Participant OI using cached data ({poi.get('fallback_source','cache')}) — "
+            f"FII bias={poi.get('fii_futures_bias','?')}"
+        )
+    elif "unavailable" in smart_dir.lower() or "cannot" in smart_dir.lower():
         flags.append("PARTICIPANT_OI_MISSING")
         warnings.append("Participant-wise Derivative OI unavailable — smart money direction unconfirmed (~10% weight)")
 
@@ -212,13 +233,16 @@ def derive_data_quality(meta: dict, ctx: dict) -> dict:
     if "PARTICIPANT_OI_MISSING" in flags:
         missing_layers.append("Smart Money Derivatives OI (~10% weight)")
 
+    has_fallback_data = "FII_DII_PREV_DAY" in flags or "PARTICIPANT_OI_CACHED" in flags
     safe_to_trade = len(missing_layers) == 0
 
     return {
-        "flags":          flags,
-        "warnings":       warnings,
-        "missing_layers": missing_layers,
-        "safe_to_trade":  safe_to_trade,
+        "flags":             flags,
+        "warnings":          warnings,
+        "missing_layers":    missing_layers,
+        "safe_to_trade":     safe_to_trade,
+        "is_premarket":      is_premarket,
+        "has_fallback_data": has_fallback_data,
         "penalty_note": (
             f"⚠ {len(missing_layers)} key data layer(s) unavailable. "
             f"Displayed confidence scores may be inflated by ~0.5–1.0 points."
