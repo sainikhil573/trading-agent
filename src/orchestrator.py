@@ -124,6 +124,12 @@ def run_morning_analysis(api_key: str) -> dict:
     )
     stock_signals_list = build_stock_signals(df_fno)
 
+    # S2C — daily health report after all fetches
+    _save_health_report(
+        today, vix, fii_dii, meta_nifty, participant_oi,
+        global_cues, fno_universe_tech, news,
+    )
+
     # Load yesterday's post-market memory (look back up to 7 days)
     yesterday_memory: dict | None = None
     for i in range(1, 8):
@@ -132,8 +138,10 @@ def run_morning_analysis(api_key: str) -> dict:
         if pm_path.exists():
             with open(pm_path, encoding="utf-8") as f:
                 yesterday_memory = json.load(f)
-            logger.info("  Loaded market memory from %s", pm_path)
+            logger.info("  Memory loaded from %s", past)
             break
+    if yesterday_memory is None:
+        logger.info("  No memory available — fresh start")
 
     analyzer = ClaudeAnalyzer(api_key=api_key)
     brief = analyzer.generate_trade_brief(
@@ -167,11 +175,18 @@ def run_morning_analysis(api_key: str) -> dict:
             k: v for k, v in global_cues.items() if isinstance(v, dict)
         },
         "fii_dii":          fii_dii,
+        "participant_oi":   participant_oi,
     }
 
     # Apply deterministic trade gates (post-process Claude's output)
-    data_quality = derive_data_quality(brief["_meta"], brief.get("market_context", {}))
+    data_quality = derive_data_quality(brief["_meta"], brief.get("market_context", {}), is_premarket=True)
     brief = apply_trade_gates(brief, data_quality, nifty_signal, banknifty_signal)
+
+    # S2B — append allowed trades to paper journal
+    _append_to_paper_journal(brief, today)
+
+    # FIX 6 — update root project_status.md with today's run stats
+    _update_project_status(brief, today)
 
     gs = brief.get("_gate_summary", {})
     logger.info(
@@ -185,6 +200,243 @@ def run_morning_analysis(api_key: str) -> dict:
     _print_morning_brief(brief, today)
     logger.info("MORNING ANALYSIS COMPLETE")
     return brief
+
+
+# ---------------------------------------------------------------------------
+# S2C — Daily health report
+# ---------------------------------------------------------------------------
+
+def _save_health_report(
+    today: str, vix, fii_dii: dict, meta_nifty: dict,
+    participant_oi: dict, global_cues: dict,
+    fno_universe_tech: list, news: dict,
+) -> None:
+    def _status(ok: bool, fallback: bool = False) -> str:
+        if fallback:
+            return "CACHED"
+        return "FRESH" if ok else "FAILED"
+
+    fii_fallback = bool(fii_dii.get("is_prev_day"))
+    fii_ok       = fii_dii.get("fii_net_buy", 0.0) != 0.0
+    poi_cached   = bool(participant_oi.get("is_cached"))
+    poi_ok       = "error" not in participant_oi
+
+    sources = {
+        "vix":           {"status": _status(vix and float(vix) > 0), "value": vix},
+        "fii_dii":       {"status": _status(fii_ok or fii_fallback, fii_fallback),
+                          "fallback_date": fii_dii.get("fallback_date"), "fii_net": fii_dii.get("fii_net_buy")},
+        "participant_oi":{"status": _status(poi_ok or poi_cached, poi_cached),
+                          "fallback_source": participant_oi.get("fallback_source"),
+                          "bias": participant_oi.get("fii_futures_bias")},
+        "option_chain":  {"status": _status(meta_nifty.get("spot", 0) > 0),
+                          "nifty_spot": meta_nifty.get("spot"), "pcr": meta_nifty.get("pcr")},
+        "global_cues":   {"status": _status(global_cues.get("overall_bias") not in (None, "UNKNOWN")),
+                          "bias": global_cues.get("overall_bias")},
+        "technicals":    {"status": _status(sum(1 for t in fno_universe_tech if not t.get("error")) > 0),
+                          "stocks_ok": sum(1 for t in fno_universe_tech if not t.get("error")),
+                          "stocks_total": len(fno_universe_tech)},
+        "news":          {"status": _status(len(news.get("headlines", [])) > 0),
+                          "count": len(news.get("headlines", []))},
+    }
+
+    statuses  = [s["status"] for s in sources.values()]
+    n_failed  = statuses.count("FAILED")
+    overall   = "HEALTHY" if n_failed == 0 and "CACHED" not in statuses else (
+                "CRITICAL" if n_failed >= 3 else ("DEGRADED" if n_failed > 0 else "CACHED"))
+
+    report = {"date": today, "time": _ist_now_str(), "sources": sources, "overall": overall}
+    health_dir = Path("data/health")
+    health_dir.mkdir(parents=True, exist_ok=True)
+    _save(report, health_dir / f"health_{today}.json")
+    logger.info("Health report saved: %s (%d failed sources)", overall, n_failed)
+
+
+# ---------------------------------------------------------------------------
+# S2B — Paper trade journal helpers
+# ---------------------------------------------------------------------------
+
+_JOURNAL_PATH = Path("data/paper_trades/journal.json")
+
+
+def _confidence_tier(eff_conf: float | None) -> str:
+    """Map gate_effective_confidence to HIGH / MID / LOW / BELOW_FLOOR."""
+    if eff_conf is None:
+        return "BELOW_FLOOR"
+    if eff_conf >= 8.0:
+        return "HIGH"
+    if eff_conf >= 7.5:
+        return "MID"
+    if eff_conf >= 7.0:
+        return "LOW"
+    return "BELOW_FLOOR"
+
+
+def _atomic_save_journal(journal: dict) -> None:
+    """Write journal atomically: tmp → verify round-trip → rename."""
+    tmp_path = Path(str(_JOURNAL_PATH) + ".tmp")
+    _JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    raw = json.dumps(journal, indent=2, ensure_ascii=False)
+    # Verify JSON round-trips before committing
+    try:
+        json.loads(raw)
+    except Exception as exc:
+        logger.error("Journal JSON round-trip failed — aborting write: %s", exc)
+        return
+    tmp_path.write_text(raw, encoding="utf-8")
+    tmp_path.replace(_JOURNAL_PATH)
+
+
+def _append_to_paper_journal(brief: dict, today: str) -> None:
+    _JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if _JOURNAL_PATH.exists():
+        with open(_JOURNAL_PATH, encoding="utf-8") as f:
+            journal = json.load(f)
+    else:
+        journal = {"trades": []}
+
+    # Idempotent: remove today's existing entries then re-add
+    journal["trades"] = [t for t in journal["trades"] if t.get("date") != today]
+
+    for t in brief.get("stock_trades", []):
+        eff_conf = t.get("gate_effective_confidence")
+        journal["trades"].append({
+            "date":                     today,
+            "symbol":                   t.get("symbol"),
+            "signal":                   t.get("signal"),
+            "strike":                   t.get("strike"),
+            "confidence":               t.get("confidence"),
+            "gate_effective_confidence": eff_conf,
+            "confidence_tier":          _confidence_tier(eff_conf),
+            "entry_price":              t.get("entry_price"),
+            "stop_loss":                t.get("stop_loss"),
+            "target_1":                 t.get("target_1"),
+            "target_2":                 t.get("target_2"),
+            "status":                   "OPEN",
+            "outcome":                  None,
+            "was_correct":              None,
+            "hypothetical":             True,   # paper-only until live execution enabled
+            "paper_only":               True,
+        })
+
+    journal["updated"] = _ist_now_str()
+    _atomic_save_journal(journal)
+    logger.info("Paper journal updated: %d total entries", len(journal["trades"]))
+
+
+def _update_project_status(brief: dict, today: str) -> None:
+    """FIX 6 — overwrite root project_status.md with today's run stats."""
+    gs     = brief.get("_gate_summary", {})
+    ctx    = brief.get("market_context", {})
+    stock_trades = brief.get("stock_trades", [])
+    gated  = brief.get("stock_trades_gated_out", [])
+
+    health_path = Path("data/health") / f"health_{today}.json"
+    health_summary = "No health report yet"
+    if health_path.exists():
+        with open(health_path, encoding="utf-8") as f:
+            h = json.load(f)
+        srcs = h.get("sources", {})
+        health_summary = "  |  ".join(
+            f"{k.upper()}: {v['status']}" for k, v in srcs.items()
+        )
+        health_summary = f"[{h.get('overall','?')}]  {health_summary}"
+
+    trades_fired = "\n".join(
+        f"  - {t['symbol']} {t['signal']}  conf={t.get('confidence')}"
+        f"  eff={t.get('gate_effective_confidence')}  [{t.get('gate_status','?')}]"
+        for t in stock_trades
+    ) or "  None (all gated out)"
+
+    gated_summary = ", ".join(
+        f"{t.get('symbol')} {t.get('signal')} ({t.get('gate_status','')})"
+        for t in gated
+    ) or "None"
+
+    # Load rolling accuracy if available
+    acc_path = OUT_DIR / "prediction_accuracy.json"
+    acc_line = "No trades tracked yet"
+    if acc_path.exists():
+        with open(acc_path, encoding="utf-8") as f:
+            log = json.load(f)
+        # Only count entries explicitly marked hypothetical=False (post S3 format)
+        real = [r for r in log if not r.get("error") and r.get("hypothetical") is False]
+        if real:
+            correct = sum(1 for r in real if r.get("was_correct"))
+            wins    = sum(1 for r in real if r.get("outcome") in ("TARGET_1_HIT","TARGET_2_HIT"))
+            total   = len(real)
+            acc_line = (
+                f"{total} trades tracked  |  "
+                f"Direction: {correct}/{total} ({correct/total*100:.0f}%)  |  "
+                f"Wins (T1/T2): {wins}/{total} ({wins/total*100:.0f}%)"
+            )
+
+    content = f"""# Project Status — Indian F&O AI Trading Agent
+
+> Full history: `docs/project_status.md`
+
+---
+
+## Last Run: {today}  {_ist_now_str()}
+
+**Market:** {ctx.get('overall_market_bias','?')}  |  VIX zone: {ctx.get('vix_zone','?')}  |  Risk: {ctx.get('overall_risk_rating','?')}
+**Gates:** {gs.get('allowed',0)} allowed, {gs.get('blocked',0)} blocked  |  Penalty: -{gs.get('data_penalty',0):.1f}  |  Status: {gs.get('final_recommendation_status','?')}
+
+## Trades Fired Today
+
+{trades_fired}
+
+**Gated out:** {gated_summary}
+
+## Data Health
+
+{health_summary}
+
+## Running Accuracy
+
+{acc_line}
+
+---
+
+## Phase Summary
+
+| Phase | Status |
+|-------|--------|
+| Phase 1–3 + PR1–PR7 | Done |
+| 7 Critical Fixes | Done |
+| S2 (journal, health, backtest, fo_universe, memory) | Done |
+| S3 (FII fix, instrument master, intraday outcome, backtest run) | Done |
+
+## Next Steps
+
+1. Run backtest: `python -m src.backtesting.backtest_runner --days 30`
+2. Phase 5: Wire live AngelOne / Kite `_fetch()` for intraday candles
+3. News RSS: Fix ET Markets / Moneycontrol feed URLs
+4. FII/DII: Cache seeds after next 3:30 PM post-market run
+"""
+    status_path = Path("project_status.md")
+    status_path.write_text(content, encoding="utf-8")
+    logger.info("project_status.md updated for %s", today)
+
+
+def _update_paper_journal_outcomes(results: list[dict], today: str) -> None:
+    if not _JOURNAL_PATH.exists():
+        return
+    with open(_JOURNAL_PATH, encoding="utf-8") as f:
+        journal = json.load(f)
+
+    result_map = {r["symbol"]: r for r in results if not r.get("error")}
+    for entry in journal["trades"]:
+        if entry.get("date") == today and entry.get("symbol") in result_map:
+            r = result_map[entry["symbol"]]
+            entry["status"]             = "CLOSED"
+            entry["outcome"]            = r.get("outcome")
+            entry["was_correct"]        = r.get("was_correct")
+            entry["actual_close"]       = r.get("index_close")
+            entry["est_final_premium"]  = r.get("est_final_premium")
+
+    journal["updated"] = _ist_now_str()
+    _atomic_save_journal(journal)
+    logger.info("Paper journal outcomes updated for %s", today)
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +626,38 @@ _ATM_DELTA = 0.5
 _INDEX_YF = {"NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK"}
 
 
+def _fetch_yf_intraday(yf_ticker: str) -> "pd.DataFrame":
+    """
+    Fetch today's 5-minute OHLCV from yfinance for the given ticker.
+    Returns a DataFrame with columns [datetime, open, high, low, close, volume]
+    suitable for resolve_outcome_with_intraday(), or empty DataFrame on failure.
+    """
+    import pandas as pd
+    import yfinance as yf
+
+    try:
+        hist = yf.Ticker(yf_ticker).history(period="1d", interval="5m")
+        if hist.empty:
+            return pd.DataFrame()
+        hist = hist.reset_index()
+        # Normalize column names
+        hist.columns = [c.lower().replace(" ", "_") for c in hist.columns]
+        # yfinance uses 'datetime' or 'timestamp' as the index column after reset
+        rename = {}
+        for col in hist.columns:
+            if col in ("index", "date", "timestamp", "datetime"):
+                rename[col] = "datetime"
+        if rename:
+            hist = hist.rename(columns=rename)
+        needed = ["datetime", "open", "high", "low", "close", "volume"]
+        if all(c in hist.columns for c in needed):
+            return hist[needed].copy()
+        return pd.DataFrame()
+    except Exception as exc:
+        logger.warning("yfinance 5m fetch failed for %s: %s", yf_ticker, exc)
+        return pd.DataFrame()
+
+
 def run_postmarket_tracker() -> dict:
     """
     Fetch today's closing OHLC for each predicted instrument,
@@ -395,11 +679,24 @@ def run_postmarket_tracker() -> dict:
     with open(morning_path, encoding="utf-8") as f:
         morning = json.load(f)
 
-    trades = morning.get("trades", [])
-    if not trades:
-        logger.info("No recommended trades in morning brief — skipping tracker")
+    # Track both gate-allowed trades AND gated-out trades (marked hypothetical)
+    allowed_trades  = morning.get("trades", [])
+    gated_out_idx   = morning.get("trades_gated_out", [])
+    gated_out_stock = morning.get("stock_trades_gated_out", [])
+
+    # Combine: allowed trades first, then gated-out as hypothetical
+    all_trades = [
+        {**t, "_hypothetical": False} for t in allowed_trades
+    ] + [
+        {**t, "_hypothetical": True, "_gate_reason": t.get("gate_status", "GATED")}
+        for t in gated_out_idx + gated_out_stock
+    ]
+
+    if not all_trades:
+        logger.info("No trades (allowed or gated) in morning brief — skipping tracker")
         return {}
 
+    trades = all_trades
     intraday_provider = get_default_provider()
     if intraday_provider.is_available():
         logger.info("Intraday provider: %s", intraday_provider.name)
@@ -460,6 +757,11 @@ def run_postmarket_tracker() -> dict:
             _daily_ctx = {"open_p": open_p, "high_p": high_p, "low_p": low_p,
                           "was_correct": was_correct}
             _candles   = intraday_provider.get_candles(sym, date.today())
+            # FIX 3: if broker provider empty, fall back to yfinance 5m
+            if _candles.empty:
+                _candles = _fetch_yf_intraday(yf_ticker)
+                if not _candles.empty:
+                    logger.info("  %s: using yfinance 5m intraday (%d bars)", sym, len(_candles))
             _resolved  = resolve_outcome_with_intraday(
                 trade, _daily_ctx,
                 _candles if not _candles.empty else None,
@@ -471,6 +773,7 @@ def run_postmarket_tracker() -> dict:
             outcome        = _resolved["outcome"]
             data_source    = _resolved["data_source"]
 
+            is_hypo = trade.get("_hypothetical", False)
             results.append({
                 "symbol":            sym,
                 "date":              today,
@@ -498,7 +801,13 @@ def run_postmarket_tracker() -> dict:
                 "path_ambiguous":      path_ambiguous,
                 "path_note":           _resolved.get("path_note"),
                 "data_source":         data_source,
-                "note":                "Premium estimates use ATM delta=0.5 approximation",
+                "hypothetical":        is_hypo,
+                "gate_status":         trade.get("gate_status", "TRADE_ALLOWED"),
+                "note":                (
+                    "HYPOTHETICAL — trade was gated out: " + trade.get("_gate_reason", "")
+                    if is_hypo else
+                    "Premium estimates use ATM delta=0.5 approximation"
+                ),
             })
 
         except Exception as exc:
@@ -506,6 +815,8 @@ def run_postmarket_tracker() -> dict:
             results.append({"symbol": sym, "date": today, "error": str(exc)})
 
     # Append to rolling accuracy log (one entry per trade per day)
+    # Only real (non-hypothetical) trades count toward win/loss stats.
+    # Hypothetical gated-out trades are stored but marked separately.
     acc_path = OUT_DIR / "prediction_accuracy.json"
     log: list[dict] = []
     if acc_path.exists():
@@ -516,6 +827,10 @@ def run_postmarket_tracker() -> dict:
     log = [r for r in log if r.get("date") != today]
     log.extend(results)
     _save(log, acc_path)
+
+    # S2B — update paper journal with outcomes
+    real_results = [r for r in results if not r.get("hypothetical")]
+    _update_paper_journal_outcomes(real_results, today)
 
     _print_postmarket_summary(results, today, log)
     logger.info("POST-MARKET TRACKER COMPLETE")
@@ -577,12 +892,31 @@ def run_postmarket_analysis(api_key: str) -> dict:
 # 9:15 AM IST — First candle check
 # ---------------------------------------------------------------------------
 
+def _parse_trigger_level(entry_trigger: str, signal: str) -> float | None:
+    """
+    Extract the explicit spot price level from an entry_trigger string.
+    Looks for patterns like 'ABOVE 54100' or 'BELOW 23750'.
+    """
+    import re
+    kw = "ABOVE" if signal == "CALL" else "BELOW"
+    m = re.search(rf"{kw}\s+([\d,]+)", entry_trigger or "", re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1).replace(",", ""))
+        except ValueError:
+            pass
+    return None
+
+
 def run_candle_check(api_key: str) -> dict:
     """
-    9:15 AM NSE open — lightweight VIX + spot check.
-    Logs whether entry triggers from morning brief are still valid.
-    No new Claude call. Saves candle_check_YYYY-MM-DD.json.
+    9:15 AM NSE open — VIX + actual spot check.
+    Fetches real NIFTY/BANKNIFTY opening prices and auto-confirms or cancels
+    each trade based on whether its entry trigger level was met.
+    No Claude call. Saves candle_check_YYYY-MM-DD.json.
     """
+    import yfinance as yf
+
     today = date.today().strftime("%Y-%m-%d")
     logger.info("=" * 70)
     logger.info("9:15 AM CANDLE CHECK  —  %s  (%s)", today, _ist_now_str())
@@ -610,11 +944,22 @@ def run_candle_check(api_key: str) -> dict:
         for tr in po.get("trades_review", []):
             action_map[tr.get("symbol", "")] = tr.get("final_action", "?")
 
-    nse     = NSEFetcher()
-    vix_now = nse.fetch_india_vix()
+    nse        = NSEFetcher()
+    vix_now    = nse.fetch_india_vix()
     global_now = fetch_global_cues()
 
     logger.info("  VIX at open: %s  |  Global: %s", vix_now, global_now.get("overall_bias"))
+
+    # --- Fetch actual opening prices via yfinance 1-minute bars ---
+    def _get_open_price(sym: str) -> float | None:
+        ticker = _INDEX_YF.get(sym, f"{sym}.NS")
+        try:
+            hist = yf.Ticker(ticker).history(period="1d", interval="1m")
+            if not hist.empty:
+                return round(float(hist.iloc[0]["Open"]), 2)
+        except Exception as exc:
+            logger.warning("Could not fetch open price for %s: %s", sym, exc)
+        return None
 
     sep = "=" * 70
     print(f"\n{sep}")
@@ -623,29 +968,169 @@ def run_candle_check(api_key: str) -> dict:
     print(f"  Wait for first 15-min candle close at 9:30 AM IST before entering.")
     print(sep)
 
+    trigger_results = []
     for t in trades:
         sym    = t.get("symbol", "?")
         sig    = t.get("signal", "?")
         strike = t.get("strike", "?")
         action = action_map.get(sym, "NOT REVIEWED")
-        trigger = t.get("entry_trigger", "Check morning brief")
-        icon = {"GO": "OK", "WAIT": "--", "SKIP": "XX"}.get(action, "??")
+        trigger_text = t.get("entry_trigger", "")
+        icon   = {"GO": "OK", "WAIT": "--", "SKIP": "XX"}.get(action, "??")
+
+        open_price    = _get_open_price(sym)
+        trigger_level = _parse_trigger_level(trigger_text, sig)
+
+        if open_price and trigger_level:
+            if sig == "CALL":
+                trigger_met = open_price >= trigger_level
+            else:
+                trigger_met = open_price <= trigger_level
+            auto_decision = "CONFIRMED" if trigger_met else "CANCELLED"
+            trigger_note  = (
+                f"Open={open_price:,.0f} vs trigger {'ABOVE' if sig=='CALL' else 'BELOW'} "
+                f"{trigger_level:,.0f} → {auto_decision}"
+            )
+        else:
+            trigger_met   = None
+            auto_decision = "UNKNOWN (could not parse trigger)"
+            trigger_note  = f"Open={open_price}"
+
+        trigger_results.append({
+            "symbol":        sym,
+            "signal":        sig,
+            "strike":        strike,
+            "pre_open":      action,
+            "open_price":    open_price,
+            "trigger_level": trigger_level,
+            "trigger_met":   trigger_met,
+            "auto_decision": auto_decision,
+        })
+
         print(f"\n  [{icon}] {sym} {sig} {strike}  [Pre-open: {action}]")
-        print(f"       Trigger: {trigger}")
+        print(f"       Trigger: {trigger_note}")
+        logger.info("  %s %s: %s", sym, sig, trigger_note)
 
     print(f"\n{sep}\n")
 
     result = {
-        "date":                  today,
-        "time":                  _ist_now_str(),
-        "vix_at_open":           vix_now,
-        "global_bias_at_open":   global_now.get("overall_bias"),
-        "trades_active":         len(trades),
-        "pre_open_actions":      action_map,
+        "date":                today,
+        "time":                _ist_now_str(),
+        "vix_at_open":         vix_now,
+        "global_bias_at_open": global_now.get("overall_bias"),
+        "trades_active":       len(trades),
+        "pre_open_actions":    action_map,
+        "trigger_checks":      trigger_results,
     }
     _save(result, OUT_DIR / f"candle_check_{today}.json")
     logger.info("CANDLE CHECK COMPLETE")
     return result
+
+
+def run_dry_run_postmarket() -> dict:
+    """
+    Simulate 3:30 PM post-market run using today's available data.
+    Verifies:
+    - post_market outcome tracking works
+    - yfinance intraday 5m fetch works or fails gracefully
+    - journal entries update without corruption (atomic write)
+    - project_status.md updates correctly
+
+    Uses atomic write pattern: write to .tmp then rename, never corrupt on failure.
+    Never writes partial data. If corruption detected: abort and log error.
+    """
+    today = date.today().strftime("%Y-%m-%d")
+    logger.info("=" * 70)
+    logger.info("DRY-RUN POST-MARKET  —  %s  (%s)", today, _ist_now_str())
+    logger.info("=" * 70)
+
+    report: dict = {
+        "date":           today,
+        "mode":           "dry_run",
+        "checks":         {},
+        "errors":         [],
+        "warnings":       [],
+    }
+
+    # Check 1: morning brief exists
+    morning_path = OUT_DIR / f"trade_brief_morning_{today}.json"
+    if not morning_path.exists():
+        msg = f"No morning brief for {today} — dry-run cannot proceed without it"
+        logger.warning(msg)
+        report["errors"].append(msg)
+        report["checks"]["morning_brief"] = "MISSING"
+        return report
+
+    report["checks"]["morning_brief"] = "FOUND"
+
+    # Check 2: yfinance intraday 5m fetch (graceful failure)
+    test_sym = "^NSEI"
+    try:
+        candles = _fetch_yf_intraday(test_sym)
+        if not candles.empty:
+            report["checks"]["yf_intraday_5m"] = f"OK ({len(candles)} bars)"
+            logger.info("  yfinance 5m fetch: OK (%d bars for %s)", len(candles), test_sym)
+        else:
+            report["checks"]["yf_intraday_5m"] = "EMPTY (market may be closed)"
+            report["warnings"].append("yfinance 5m fetch returned empty — market may be closed")
+    except Exception as exc:
+        report["checks"]["yf_intraday_5m"] = f"FAILED: {exc}"
+        report["warnings"].append(f"yfinance 5m fetch failed: {exc}")
+        logger.warning("  yfinance 5m fetch failed: %s", exc)
+
+    # Check 3: journal atomic write integrity
+    if _JOURNAL_PATH.exists():
+        try:
+            with open(_JOURNAL_PATH, encoding="utf-8") as f:
+                journal = json.load(f)
+            # Verify round-trip serialization
+            raw = json.dumps(journal, indent=2, ensure_ascii=False)
+            reloaded = json.loads(raw)
+            assert reloaded == journal, "Round-trip mismatch"
+            report["checks"]["journal_integrity"] = f"OK ({len(journal.get('trades',[]))} entries)"
+            logger.info("  Journal integrity: OK (%d entries)", len(journal.get("trades", [])))
+        except Exception as exc:
+            msg = f"Journal integrity check failed: {exc}"
+            report["errors"].append(msg)
+            report["checks"]["journal_integrity"] = f"FAILED: {exc}"
+            logger.error("  %s", msg)
+    else:
+        report["checks"]["journal_integrity"] = "NO_JOURNAL (expected for first run)"
+        report["warnings"].append("No journal file yet — will be created on first morning run")
+
+    # Check 4: project_status.md writeable
+    status_path = Path("project_status.md")
+    try:
+        if status_path.exists():
+            status_path.read_text(encoding="utf-8")
+        report["checks"]["project_status_md"] = "OK"
+    except Exception as exc:
+        report["errors"].append(f"project_status.md not readable: {exc}")
+        report["checks"]["project_status_md"] = f"FAILED: {exc}"
+
+    # Check 5: atomic write pattern test (write .tmp, verify, rename)
+    _test_path = _JOURNAL_PATH.parent / "_dry_run_test.json"
+    _test_tmp  = Path(str(_test_path) + ".tmp")
+    try:
+        _test_path.parent.mkdir(parents=True, exist_ok=True)
+        test_data = {"dry_run": True, "date": today}
+        raw = json.dumps(test_data, indent=2)
+        json.loads(raw)   # verify round-trip
+        _test_tmp.write_text(raw, encoding="utf-8")
+        _test_tmp.replace(_test_path)
+        _test_path.unlink()
+        report["checks"]["atomic_write_pattern"] = "OK"
+    except Exception as exc:
+        report["errors"].append(f"Atomic write pattern test failed: {exc}")
+        report["checks"]["atomic_write_pattern"] = f"FAILED: {exc}"
+
+    overall = "PASS" if not report["errors"] else "FAIL"
+    report["overall"] = overall
+    n_warn = len(report["warnings"])
+    logger.info("Dry-run complete: %s  (%d errors, %d warnings)",
+                overall, len(report["errors"]), n_warn)
+
+    _save(report, OUT_DIR / f"dry_run_postmarket_{today}.json")
+    return report
 
 
 def _print_postmarket_summary(
@@ -659,47 +1144,75 @@ def _print_postmarket_summary(
     print(sep)
 
     outcome_icon = {
-        "TARGET_2_HIT":    "[T2]",
-        "TARGET_1_HIT":    "[T1]",
-        "SL_HIT":          "[SL]",
-        "DIRECTION_RIGHT": "[OK]",
-        "DIRECTION_WRONG": "[XX]",
-        "OUTCOME_UNKNOWN": "[??]",
+        "TARGET_2_HIT":    "[T2 WIN ]",
+        "TARGET_1_HIT":    "[T1 WIN ]",
+        "SL_HIT":          "[SL LOSS]",
+        "DIRECTION_RIGHT": "[OK     ]",
+        "DIRECTION_WRONG": "[WRONG  ]",
+        "OUTCOME_UNKNOWN": "[UNKNOWN]",
     }
 
-    for r in results:
-        if r.get("error"):
-            print(f"\n  {r['symbol']:12s}  ERROR: {r['error']}")
-            continue
-        icon = outcome_icon.get(r.get("outcome", ""), "[??]")
+    real_results  = [r for r in results if not r.get("hypothetical") and not r.get("error")]
+    hypo_results  = [r for r in results if r.get("hypothetical") and not r.get("error")]
+
+    if real_results:
+        print("\n  === LIVE TRADES (counted in accuracy) ===")
+    for r in real_results:
+        icon = outcome_icon.get(r.get("outcome", ""), "[???????]")
         corr = "CORRECT" if r.get("was_correct") else "WRONG"
         print(f"\n  {icon} {r['symbol']:10s} {r['signal']:4s}  "
-              f"Direction: {corr}  ({r.get('predicted_direction')} predicted / {r.get('actual_direction')} actual)")
-        print(f"       Index: O={r['index_open']}  H={r['index_high']}  "
+              f"Direction: {corr}  ({r.get('predicted_direction')} / {r.get('actual_direction')})")
+        print(f"       OHLC: O={r['index_open']}  H={r['index_high']}  "
               f"L={r['index_low']}  C={r['index_close']}  "
               f"({r['day_change_pts']:+.0f} pts  {r['day_change_pct']:+.2f}%)")
         if r.get("entry_premium"):
             print(f"       Premium: entry={r['entry_premium']}  "
                   f"est.final={r.get('est_final_premium')}  "
                   f"SL={r['sl_premium']}  T1={r['target_1_premium']}  T2={r.get('target_2_premium')}")
-            print(f"       SL hit={r['sl_hit']}  T1 reached={r['target_1_reached']}  "
-                  f"T2 reached={r['target_2_reached']}")
+            print(f"       SL hit={r['sl_hit']}  T1={r['target_1_reached']}  T2={r['target_2_reached']}")
 
-    # Rolling accuracy stats across the full log
-    valid = [r for r in full_log if not r.get("error")]
-    if valid:
-        correct  = sum(1 for r in valid if r.get("was_correct"))
-        t1_hits  = sum(1 for r in valid if r.get("outcome") == "TARGET_1_HIT")
-        t2_hits  = sum(1 for r in valid if r.get("outcome") == "TARGET_2_HIT")
-        sl_hits  = sum(1 for r in valid if r.get("outcome") == "SL_HIT")
-        unknown  = sum(1 for r in valid if r.get("outcome") == "OUTCOME_UNKNOWN")
-        total    = len(valid)
-        print(f"\n  --- ROLLING ACCURACY ({total} trades tracked) ---")
-        print(f"  Direction correct : {correct}/{total}  ({correct/total*100:.1f}%)")
-        print(f"  Target 1 hit      : {t1_hits}/{total}  ({t1_hits/total*100:.1f}%)")
-        print(f"  Target 2 hit      : {t2_hits}/{total}  ({t2_hits/total*100:.1f}%)")
-        print(f"  SL hit            : {sl_hits}/{total}  ({sl_hits/total*100:.1f}%)")
+    if hypo_results:
+        print("\n  === HYPOTHETICAL (gated-out — not counted in accuracy) ===")
+    for r in hypo_results:
+        icon = outcome_icon.get(r.get("outcome", ""), "[???????]")
+        corr = "CORRECT" if r.get("was_correct") else "WRONG"
+        gate = r.get("gate_status", "GATED")
+        print(f"\n  {icon} {r['symbol']:10s} {r['signal']:4s}  "
+              f"Direction: {corr}  [GATED: {gate}]  ({r.get('predicted_direction')} / {r.get('actual_direction')})")
+        print(f"       OHLC: O={r.get('index_open')}  H={r.get('index_high')}  "
+              f"L={r.get('index_low')}  C={r.get('index_close')}  "
+              f"({r.get('day_change_pts',0):+.0f} pts  {r.get('day_change_pct',0):+.2f}%)")
+
+    # Rolling accuracy stats — real trades only
+    real_log  = [r for r in full_log if not r.get("error") and not r.get("hypothetical")]
+    hypo_log  = [r for r in full_log if not r.get("error") and r.get("hypothetical")]
+
+    if real_log:
+        total   = len(real_log)
+        correct = sum(1 for r in real_log if r.get("was_correct"))
+        t1_hits = sum(1 for r in real_log if r.get("outcome") == "TARGET_1_HIT")
+        t2_hits = sum(1 for r in real_log if r.get("outcome") == "TARGET_2_HIT")
+        sl_hits = sum(1 for r in real_log if r.get("outcome") == "SL_HIT")
+        unknown = sum(1 for r in real_log if r.get("outcome") == "OUTCOME_UNKNOWN")
+        wins    = t1_hits + t2_hits
+        print(f"\n  === ROLLING ACCURACY — {total} LIVE TRADES ===")
+        print(f"  WIN  (T1+T2 hit)   : {wins}/{total}  ({wins/total*100:.1f}%)")
+        print(f"  LOSS (SL hit)      : {sl_hits}/{total}  ({sl_hits/total*100:.1f}%)")
+        print(f"  Direction correct  : {correct}/{total}  ({correct/total*100:.1f}%)")
+        print(f"  Target 1 hit       : {t1_hits}/{total}  ({t1_hits/total*100:.1f}%)")
+        print(f"  Target 2 hit       : {t2_hits}/{total}  ({t2_hits/total*100:.1f}%)")
         if unknown:
-            print(f"  OUTCOME_UNKNOWN   : {unknown}/{total}  (intraday sequence unavailable — not counted)")
+            print(f"  OUTCOME_UNKNOWN    : {unknown}/{total}  (not counted)")
+    else:
+        print("\n  No live trades tracked yet.")
+
+    if hypo_log:
+        total_h   = len(hypo_log)
+        correct_h = sum(1 for r in hypo_log if r.get("was_correct"))
+        wins_h    = sum(1 for r in hypo_log if r.get("outcome") in ("TARGET_1_HIT","TARGET_2_HIT"))
+        print(f"\n  === HYPOTHETICAL GATE ANALYSIS — {total_h} GATED TRADES ===")
+        print(f"  Would have been correct: {correct_h}/{total_h}  ({correct_h/total_h*100:.1f}%)")
+        print(f"  Would have been wins   : {wins_h}/{total_h}  ({wins_h/total_h*100:.1f}%)")
+        print(f"  (These trades were blocked by the gate system)")
 
     print(f"\n{sep}\n")

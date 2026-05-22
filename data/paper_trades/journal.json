@@ -1,0 +1,24 @@
+{
+  "_note": "Paper trade journal. Populated automatically after each morning analysis. Never contains hypothetical/gated-out trades.",
+  "trades": [
+    {
+      "date": "2026-05-22",
+      "symbol": "WIPRO",
+      "signal": "CALL",
+      "strike": null,
+      "confidence": 7.3,
+      "gate_effective_confidence": 7.0,
+      "confidence_tier": "LOW",
+      "entry_price": 5.5,
+      "stop_loss": 2.75,
+      "target_1": 9.5,
+      "target_2": 13.0,
+      "status": "OPEN",
+      "outcome": null,
+      "was_correct": null,
+      "hypothetical": true,
+      "paper_only": true
+    }
+  ],
+  "updated": "12:29 IST"
+}

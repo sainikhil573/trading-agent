@@ -1,13 +1,25 @@
 """
 Global market cues fetcher via yfinance.
-GIFT Nifty (formerly SGX Nifty) is not on Yahoo Finance; we use S&P 500 futures
-as the primary US overnight proxy and note the gap separately.
+GIFT Nifty (formerly SGX Nifty) is not on Yahoo Finance; we use a priority
+fallback chain for the opening gap estimate (see fetch_opening_gap()).
 """
 
 import logging
+import requests
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
+
+_NSE_GIFT_URL = "https://www.nseindia.com/api/giftNifty"
+_NSE_HEADERS  = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+    "Referer": "https://www.nseindia.com/",
+}
 
 # symbol -> human label
 TICKERS = {
@@ -33,6 +45,97 @@ def _fetch_ticker(symbol: str) -> dict:
     except Exception as exc:
         logger.warning("Failed to fetch %s: %s", symbol, exc)
         return {"last": None, "prev_close": None, "pct_change": None, "error": str(exc)}
+
+
+def fetch_opening_gap() -> dict:
+    """
+    Opening gap estimate with priority chain:
+      1. GIFT Nifty via NSE API (https://www.nseindia.com/api/giftNifty)
+      2. ^NSEI from yfinance — most recent bar as proxy
+      3. S&P 500 futures ES=F from yfinance — current fallback
+
+    Returns
+    -------
+    {
+      "source":     "gift_nifty" | "nsei_proxy" | "sp500_proxy",
+      "value":      float | None,
+      "pct_change": float | None,
+      "error":      str | None,
+    }
+    Never raises — always returns dict.
+    """
+    # --- 1. GIFT Nifty via NSE API ---
+    try:
+        resp = requests.get(_NSE_GIFT_URL, headers=_NSE_HEADERS, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            # NSE API returns different shapes; try common key paths
+            last  = None
+            change_pct = None
+            for key in ("last", "lastPrice", "lastTradedPrice", "ltp"):
+                if key in data:
+                    last = float(data[key])
+                    break
+            for key in ("pChange", "percentChange", "change_pct"):
+                if key in data:
+                    change_pct = float(data[key])
+                    break
+            if last is not None:
+                logger.info("Opening gap: GIFT Nifty = %.2f (%.2f%%)",
+                            last, change_pct or 0)
+                return {
+                    "source": "gift_nifty",
+                    "value": last,
+                    "pct_change": change_pct,
+                    "error": None,
+                }
+    except Exception as exc:
+        logger.info("GIFT Nifty fetch failed (expected — no free source): %s", exc)
+
+    # --- 2. ^NSEI proxy via yfinance ---
+    try:
+        data = _fetch_ticker("^NSEI")
+        if data["last"]:
+            pct = data["pct_change"]
+            logger.info("Opening gap proxy: ^NSEI = %.2f (%.2f%%)",
+                        data["last"], pct or 0)
+            return {
+                "source": "nsei_proxy",
+                "value": data["last"],
+                "pct_change": pct,
+                "error": None,
+            }
+    except Exception as exc:
+        logger.info("^NSEI proxy fetch failed: %s", exc)
+
+    # --- 3. S&P 500 futures ES=F fallback ---
+    try:
+        data = _fetch_ticker("ES=F")
+        if data["last"]:
+            pct = data["pct_change"]
+            logger.info("Opening gap proxy: ES=F = %.2f (%.2f%%)",
+                        data["last"], pct or 0)
+            return {
+                "source": "sp500_proxy",
+                "value": data["last"],
+                "pct_change": pct,
+                "error": None,
+            }
+    except Exception as exc:
+        logger.warning("ES=F proxy fetch failed: %s", exc)
+        return {
+            "source": "sp500_proxy",
+            "value": None,
+            "pct_change": None,
+            "error": str(exc),
+        }
+
+    return {
+        "source": "sp500_proxy",
+        "value": None,
+        "pct_change": None,
+        "error": "All opening gap sources failed",
+    }
 
 
 def fetch_global_cues() -> dict:
@@ -83,4 +186,8 @@ def fetch_global_cues() -> dict:
     results["overall_bias"]    = bias
     results["positive_count"]  = positive
     results["negative_count"]  = negative
+
+    # Opening gap estimate (GIFT Nifty → ^NSEI → ES=F fallback)
+    results["opening_gap"] = fetch_opening_gap()
+
     return results

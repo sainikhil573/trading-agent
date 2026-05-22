@@ -107,6 +107,22 @@ def run_postmarket_once() -> None:
         logger.exception("Post-market analysis failed")
 
 
+def run_dry_run_postmarket_once() -> None:
+    from src.orchestrator import run_dry_run_postmarket
+    try:
+        result = run_dry_run_postmarket()
+        overall = result.get("overall", "UNKNOWN")
+        logger.info("Dry-run post-market result: %s", overall)
+        if result.get("errors"):
+            for e in result["errors"]:
+                logger.error("  ERROR: %s", e)
+        if result.get("warnings"):
+            for w in result["warnings"]:
+                logger.warning("  WARN:  %s", w)
+    except Exception:
+        logger.exception("Dry-run post-market failed")
+
+
 def run_scheduled() -> None:
     """
     Timezone-aware scheduler loop.
@@ -181,6 +197,8 @@ if __name__ == "__main__":
                         help="Run post-market tracker + Claude grade right now (one-shot)")
     parser.add_argument("--dashboard",  action="store_true",
                         help="Launch the Streamlit dashboard only (no analysis run)")
+    parser.add_argument("--dry-run-postmarket", action="store_true",
+                        help="Simulate post-market run: verify journal, yfinance 5m, atomic write")
     args = parser.parse_args()
 
     if args.schedule:
@@ -193,5 +211,7 @@ if __name__ == "__main__":
         run_postmarket_once()
     elif args.dashboard:
         _launch_dashboard()
+    elif getattr(args, "dry_run_postmarket", False):
+        run_dry_run_postmarket_once()
     else:
         run_morning_once()

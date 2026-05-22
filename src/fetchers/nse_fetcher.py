@@ -2,11 +2,27 @@
 NSE data fetcher built on jugaad-data (handles NSE session auth internally).
 """
 
+import json
 import logging
+from datetime import date, timedelta
+from pathlib import Path
+
 import pandas as pd
 from jugaad_data.nse import NSELive
 
 logger = logging.getLogger(__name__)
+
+_RAW_DIR = Path(__file__).parent.parent.parent / "data" / "raw"
+
+
+def _prev_weekdays(n: int = 5) -> list[date]:
+    """Return the last n weekday dates before today."""
+    result, check = [], date.today()
+    while len(result) < n:
+        check -= timedelta(days=1)
+        if check.weekday() < 5:
+            result.append(check)
+    return result
 
 
 class NSEFetcher:
@@ -136,11 +152,34 @@ class NSEFetcher:
 
     def fetch_fii_dii(self) -> dict:
         """
-        Fetch latest FII/DII cash market net activity (in crores).
-        Falls back to zeros when NSE does not publish today's data yet.
+        Fetch FII/DII cash market net activity.
+        Saves non-zero results to data/raw/.
+        Falls back to previous trading day's cache if today returns zero.
+        Never returns all-zeros — always provides last available data.
+        Adds 'is_prev_day' and 'fallback_date' fields when using cached data.
         """
+        _RAW_DIR.mkdir(parents=True, exist_ok=True)
+        today = date.today()
+
+        def _cache_path(d: date) -> Path:
+            return _RAW_DIR / f"fii_dii_{d.strftime('%Y-%m-%d')}.json"
+
+        def _save(data: dict, d: date) -> None:
+            with open(_cache_path(d), "w") as f:
+                json.dump(data, f)
+
+        def _load(d: date) -> dict | None:
+            p = _cache_path(d)
+            if p.exists():
+                try:
+                    return json.load(open(p))
+                except Exception:
+                    pass
+            return None
+
+        # --- Try live fetch (loop all rows to find first non-zero) ---
         try:
-            import requests
+            from datetime import datetime as _dt
             url = "https://www.nseindia.com/api/fiidiiTradeReact"
             headers = {
                 "User-Agent": (
@@ -151,18 +190,55 @@ class NSEFetcher:
                 "Referer": "https://www.nseindia.com/",
                 "Accept": "application/json",
             }
-            # Reuse the jugaad session so cookies are already set
             resp = self._nse.s.get(url, headers=headers, timeout=15)
             rows = resp.json() if resp.ok else []
-            if rows:
-                row = rows[0]
-                return {
+            for row in rows:
+                data = {
                     "date":        row.get("date", ""),
                     "fii_net_buy": float(row.get("fiiNetDeal", 0)),
                     "dii_net_buy": float(row.get("diiNetDeal", 0)),
                 }
+                if data["fii_net_buy"] == 0.0 and data["dii_net_buy"] == 0.0:
+                    continue  # skip zero rows (today not yet published)
+                # Parse the row date (NSE format: "21-May-2026")
+                try:
+                    row_date = _dt.strptime(data["date"], "%d-%b-%Y").date()
+                except ValueError:
+                    row_date = None
+                if row_date and row_date < today:
+                    # Historical row — treat as prev-day fallback
+                    data["is_prev_day"]    = True
+                    data["fallback_date"]  = row_date.isoformat()
+                    data["fallback_source"] = "api_historical"
+                    logger.info(
+                        "FII loaded from API (prev day %s): FII=%.0f Cr  DII=%.0f Cr",
+                        row_date, data["fii_net_buy"], data["dii_net_buy"],
+                    )
+                else:
+                    _save(data, today)
+                    logger.info(
+                        "FII/DII live (today): FII=%.0f Cr  DII=%.0f Cr",
+                        data["fii_net_buy"], data["dii_net_buy"],
+                    )
+                return data
         except Exception as exc:
-            logger.error("Failed to fetch FII/DII data: %s", exc)
+            logger.error("FII/DII live fetch failed: %s", exc)
+
+        # --- Fallback: load previous trading day cache ---
+        logger.warning("FII/DII: API returned all zeros — checking local cache")
+        for prev in _prev_weekdays(5):
+            cached = _load(prev)
+            if cached and (cached.get("fii_net_buy") or cached.get("dii_net_buy")):
+                cached["is_prev_day"]    = True
+                cached["fallback_date"]  = prev.isoformat()
+                cached["fallback_source"] = "cache"
+                logger.info(
+                    "FII loaded from cache [%s]: FII=%.0f Cr  DII=%.0f Cr",
+                    prev, cached["fii_net_buy"], cached["dii_net_buy"],
+                )
+                return cached
+
+        logger.warning("FII unavailable — using neutral assumption (no cache yet)")
         return {"date": "", "fii_net_buy": 0.0, "dii_net_buy": 0.0}
 
     # ------------------------------------------------------------------
@@ -172,20 +248,69 @@ class NSEFetcher:
     def fetch_participant_oi(self) -> dict:
         """
         Fetch FII/DII/PRO/Client participant-wise OI from NSE archives CSV.
-        Tries the last 4 weekdays until a valid file is found.
-
-        Returns dict with keys:
-          fii_long_pct, fii_futures_bias, fii/dii/pro/client sub-dicts,
-          data_date, error
+        Tries the last 5 weekdays on NSE archives, then falls back to local cache,
+        then falls back to 3-day average of cached files.
+        Never returns UNKNOWN if any cached data exists.
         """
         import csv, io
-        from datetime import date, timedelta
 
-        for days_back in range(1, 6):
-            check = date.today() - timedelta(days=days_back)
-            if check.weekday() >= 5:
-                continue
-            ds  = check.strftime("%d%m%Y")
+        _RAW_DIR.mkdir(parents=True, exist_ok=True)
+
+        def _cache_path(d: date) -> Path:
+            return _RAW_DIR / f"participant_oi_{d.strftime('%Y-%m-%d')}.json"
+
+        def _save(data: dict, d: date) -> None:
+            with open(_cache_path(d), "w") as f:
+                json.dump(data, f)
+
+        def _load(d: date) -> dict | None:
+            p = _cache_path(d)
+            if p.exists():
+                try:
+                    return json.load(open(p))
+                except Exception:
+                    pass
+            return None
+
+        def _parse_csv(text: str, for_date: date) -> dict | None:
+            reader = csv.DictReader(io.StringIO(text))
+            result: dict = {}
+            for row in reader:
+                ct = (row.get("Client Type") or "").strip()
+                if ct not in ("FII", "DII", "PRO", "Client"):
+                    continue
+
+                def _i(k: str) -> int:
+                    return int((row.get(k) or "0").replace(",", "") or 0)
+
+                result[ct] = {
+                    "fut_idx_long":  _i("Future Index Long"),
+                    "fut_idx_short": _i("Future Index Short"),
+                    "opt_call_long": _i("Option Index Call Long"),
+                    "opt_call_short":_i("Option Index Call Short"),
+                    "opt_put_long":  _i("Option Index Put Long"),
+                    "opt_put_short": _i("Option Index Put Short"),
+                }
+            if not result:
+                return None
+            fii   = result.get("FII", {})
+            longs  = fii.get("fut_idx_long", 0)
+            shorts = fii.get("fut_idx_short", 0)
+            total  = longs + shorts
+            pct    = round(longs / total * 100, 1) if total > 0 else None
+            result["fii_long_pct"]     = pct
+            result["fii_futures_bias"] = (
+                "BULLISH" if pct and pct > 60 else
+                "BEARISH" if pct and pct < 40 else
+                "NEUTRAL"
+            )
+            result["data_date"] = for_date.isoformat()
+            result["error"]     = None
+            return result
+
+        # --- Attempt 1: NSE archives for last 5 weekdays ---
+        for prev in _prev_weekdays(5):
+            ds  = prev.strftime("%d%m%Y")
             url = (
                 f"https://nsearchives.nseindia.com/content/nsccl/"
                 f"fao_participant_oi_{ds}.csv"
@@ -194,51 +319,56 @@ class NSEFetcher:
                 resp = self._nse.s.get(url, timeout=15)
                 if resp.status_code != 200 or not resp.text.strip():
                     continue
-                reader  = csv.DictReader(io.StringIO(resp.text))
-                result: dict[str, dict] = {}
-                for row in reader:
-                    ct = (row.get("Client Type") or "").strip()
-                    if ct not in ("FII", "DII", "PRO", "Client"):
-                        continue
+                parsed = _parse_csv(resp.text, prev)
+                if parsed:
+                    _save(parsed, prev)
+                    logger.info(
+                        "Participant OI (%s): FII longs %s%% → %s",
+                        prev, parsed["fii_long_pct"], parsed["fii_futures_bias"],
+                    )
+                    return parsed
+            except Exception as exc:
+                logger.warning("Participant OI NSE fetch failed for %s: %s", ds, exc)
 
-                    def _i(k: str) -> int:
-                        return int((row.get(k) or "0").replace(",", "") or 0)
+        logger.warning("Participant OI: all NSE archive fetches failed — checking local cache")
 
-                    result[ct] = {
-                        "fut_idx_long":       _i("Future Index Long"),
-                        "fut_idx_short":      _i("Future Index Short"),
-                        "opt_call_long":      _i("Option Index Call Long"),
-                        "opt_call_short":     _i("Option Index Call Short"),
-                        "opt_put_long":       _i("Option Index Put Long"),
-                        "opt_put_short":      _i("Option Index Put Short"),
-                    }
+        # --- Attempt 2: load from local cache (most recent) ---
+        cached_files: list[tuple[date, dict]] = []
+        for prev in _prev_weekdays(10):
+            d = _load(prev)
+            if d and d.get("fii_futures_bias") not in (None, "UNKNOWN"):
+                cached_files.append((prev, d))
 
-                if not result:
-                    continue
+        if cached_files:
+            # Use the most recent cached file
+            most_recent_date, most_recent = cached_files[0]
+            most_recent = dict(most_recent)
+            most_recent["is_cached"]      = True
+            most_recent["fallback_source"] = "cache_file"
+            logger.info(
+                "Participant OI fallback from cache (%s): FII bias=%s",
+                most_recent_date, most_recent.get("fii_futures_bias"),
+            )
 
-                fii    = result.get("FII", {})
-                longs  = fii.get("fut_idx_long", 0)
-                shorts = fii.get("fut_idx_short", 0)
-                total  = longs + shorts
-                pct    = round(longs / total * 100, 1) if total > 0 else None
-
-                result["fii_long_pct"]    = pct
-                result["fii_futures_bias"] = (
-                    "BULLISH" if pct and pct > 60 else
-                    "BEARISH" if pct and pct < 40 else
+            # Attempt 3: 3-day average when >= 3 cached files available
+            if len(cached_files) >= 3:
+                avg_pct = round(
+                    sum(d.get("fii_long_pct") or 50 for _, d in cached_files[:3]) / 3, 1
+                )
+                most_recent["fii_long_pct"]     = avg_pct
+                most_recent["fii_futures_bias"]  = (
+                    "BULLISH" if avg_pct > 60 else
+                    "BEARISH" if avg_pct < 40 else
                     "NEUTRAL"
                 )
-                result["data_date"] = check.isoformat()
-                result["error"]     = None
+                most_recent["fallback_source"] = "3day_average"
                 logger.info(
-                    "  Participant OI (%s): FII longs %s%% → %s",
-                    check, pct, result["fii_futures_bias"]
+                    "Participant OI: 3-day average FII long pct = %.1f%% → %s",
+                    avg_pct, most_recent["fii_futures_bias"],
                 )
-                return result
+            return most_recent
 
-            except Exception as exc:
-                logger.warning("Participant OI fetch failed for %s: %s", ds, exc)
-
+        logger.error("Participant OI: no live or cached data available")
         return {"error": "Could not fetch participant OI", "fii_futures_bias": "UNKNOWN"}
 
     # ------------------------------------------------------------------

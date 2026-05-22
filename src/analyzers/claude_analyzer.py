@@ -124,6 +124,11 @@ Produce: news_sentiment_score, breadth_signal
 3. Derivative signal strength — weight 20%
 4. Technical alignment (all timeframes) — weight 20%
 5. Volume confirmation — weight 10%
+   Volume scoring guide (use Vol/Avg from the technicals table):
+   Vol/Avg >= 1.0  → score 9  (strong conviction)
+   Vol/Avg >= 0.6  → score 7  (good, trade is valid)
+   Vol/Avg >= 0.3  → score 5  (acceptable, pre-market is always lower)
+   Vol/Avg < 0.3   → score 2  (very low conviction, avoid)
 6. News/sentiment alignment — weight 5%
 7. Event risk (10 = no events; 1 = major event today) — 5%
 8. Risk-Reward quality (10 = better than 1:3) — weight 5%
@@ -234,9 +239,9 @@ Position size rules:
 After completing the 6-layer index analysis, analyze each stock in the F&O UNIVERSE data:
 
 STOCK SIGNAL RULES:
-- CALL setup  : STRONG_BULL ema_trend + RSI recovering from <45 + MACD histogram turning positive + Vol/Avg > 1.2
-- PUT setup   : STRONG_BEAR ema_trend + RSI failing below 55 + MACD histogram negative/falling + Vol/Avg > 1.2
-- NEUTRAL     : MIXED trend, conflicting signals, or Vol/Avg < 0.8 (low conviction)
+- CALL setup  : STRONG_BULL ema_trend + RSI recovering from <45 + MACD histogram turning positive + Vol/Avg > 0.6
+- PUT setup   : STRONG_BEAR ema_trend + RSI failing below 55 + MACD histogram negative/falling + Vol/Avg > 0.6
+- NEUTRAL     : MIXED trend, conflicting signals, or Vol/Avg < 0.3 (very low conviction)
 - OVERSOLD CALL: RSI < 30 + price near prev_day_low + any hint of volume pickup
 - OVERBOUGHT PUT: RSI > 70 + price near prev_day_high + volume declining
 
@@ -623,12 +628,23 @@ class ClaudeAnalyzer:
         self._client = anthropic.Anthropic(api_key=api_key)
 
     def _call(self, system: str, user: str, max_tokens: int = 4096) -> str:
-        response = self._client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=max_tokens,
-            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user}],
-        )
+        import time as _time
+        for attempt in range(5):
+            try:
+                response = self._client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=max_tokens,
+                    system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+                    messages=[{"role": "user", "content": user}],
+                )
+                break
+            except anthropic.APIStatusError as exc:
+                if exc.status_code == 529 and attempt < 4:
+                    wait = 20 * (attempt + 1)
+                    logger.warning("Claude API overloaded (529) — retry %d/4 in %ds", attempt + 1, wait)
+                    _time.sleep(wait)
+                else:
+                    raise
         usage = response.usage
         logger.info(
             "Claude usage — in: %d  out: %d  cache_read: %d  cache_write: %d",

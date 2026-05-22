@@ -14,7 +14,14 @@ dashboard display, and post-market accuracy tracking using Claude API.
 
 ## Current Stage
 
-**Instrument master / token mapping layer added (feature/instrument-master-token-mapping).**
+**S2 features complete (main branch, 2026-05-22):**
+7 critical fixes + S2A–S2F:
+- S2A: Root `project_status.md` quick-reference file
+- S2B: Paper trade journal (`data/paper_trades/journal.json`) auto-populated after morning analysis, outcomes written after 3:30 PM
+- S2C: Daily health report (`data/health/health_YYYY-MM-DD.json`) — FRESH/CACHED/FAILED per source, compact bar in dashboard
+- S2D: Backtesting foundation (`src/backtesting/backtest_runner.py`) — 60-day rule-based EMA/RSI signal vs actual
+- S2E: F&O universe JSON (`data/instruments/fo_universe.json`) — 20 stocks + indices, lot/tick/strike
+- S2F: Memory loop now logs "Memory loaded from YYYY-MM-DD" or "No memory available — fresh start"
 `src/fetchers/instrument_master.py` provides a local CSV-based lookup system that translates
 human-readable symbols (NIFTY, RELIANCE) into broker-specific tokens (Kite `instrument_token`,
 Angel One `symbol_token`) before any fetch attempt. Both provider stubs now perform token
@@ -417,6 +424,60 @@ src/dashboard/app.py      — Streamlit UI: morning brief, pre-open, post-market
 - **Remaining limitations:** instrument_master.csv must be supplied by user; option tokens
   expire weekly; live `_fetch()` not yet implemented.
 - **Next step:** Phase 5 — wire live `_fetch()` in AngelOne/Kite providers.
+
+---
+
+### 2026-05-22 | S3 — Paper validation dashboard | `feature/s2-paper-validation-dashboard`
+
+- **Files changed:** `data/instruments/fo_universe.json` (backtest tiers), `src/orchestrator.py`
+  (confidence_tier, atomic journal writes, dry-run postmarket, project_status auto-update),
+  `src/fetchers/intraday_csv_parser.py` (new — Zerodha/TradingView parser),
+  `src/fetchers/global_fetcher.py` (GIFT Nifty provider with 3-source fallback),
+  `src/dashboard/app.py` (sidebar CSV upload, paper trade tracker table, health integrated into
+  DATA AVAILABILITY, backtest tier display), `main.py` (--dry-run-postmarket flag),
+  `project_status.md` (full S2 phase content), `tests/test_paper_validation.py` (20 new tests).
+- **Feature added:**
+  - T1: Backtest tiers (PRIMARY_CANDIDATE/SECONDARY_CANDIDATE/WATCHLIST_REVIEW) in fo_universe.json.
+    KOTAKBANK/HINDALCO/ADANIENT = PRIMARY. BAJFINANCE/TATASTEEL = SECONDARY. All others = WATCHLIST_REVIEW.
+    Diagnostic note: sample sizes too small for pruning decisions.
+  - T2: `confidence_tier` (HIGH/MID/LOW) added to every paper journal entry based on effective confidence.
+  - T3: `src/fetchers/intraday_csv_parser.py` — Zerodha + TradingView format parser; sidebar widget
+    in dashboard for manual CSV upload + per-trade outcome verification (entry trigger, SL, T1, T2).
+  - T4: PAPER TRADE JOURNAL section in dashboard — full table with tier/conf pills, running stats,
+    "collecting data — X of 10 needed" message until 10 completed trades.
+  - T5: Health report integrated INTO DATA AVAILABILITY section (no duplication). Old standalone block removed.
+  - T6: `fetch_opening_gap()` in global_fetcher.py — GIFT Nifty NSE API → ^NSEI proxy → ES=F fallback;
+    `fetch_global_cues()` includes `opening_gap` key.
+  - T7: `run_dry_run_postmarket()` — verifies morning brief, yf 5m fetch (39 bars for WIPRO),
+    atomic journal write, project_status update; dry-run result: PASS.
+    Atomic write pattern (`_atomic_save_journal()`): write to .tmp → verify JSON round-trip → rename.
+  - T8: `project_status.md` fully updated with S2 phase content and backtest context.
+  - T9: 20 new tests in `test_paper_validation.py`: tier assignment, confidence_tier boundaries,
+    journal append/no-duplicate, health schema, Zerodha/TradingView CSV parse, opening gap fallback,
+    dry-run no-corruption.
+- **Tests/checks:** 330 passed, 2 skipped. All 20 new tests pass. Dry-run PASS (yf 5m: 39 bars).
+- **Remaining limitations:** Paper journal currently has 1 trade (WIPRO CALL, OPEN). Need 10 completed
+  trades for meaningful tier accuracy stats. News RSS still down. FII/DII cache empty until next 3:30 PM run.
+- **Next step:** Accumulate 10 graded paper trades. Then: Phase 5 live intraday wiring.
+
+---
+
+### 2026-05-22 | S2 — Paper journal, health report, backtest, F&O universe, memory loop | `main`
+
+- **Files changed:** `src/orchestrator.py` (S2B journal helpers, S2C health report, S2F memory log),
+  `src/backtesting/backtest_runner.py` (new), `src/dashboard/app.py` (health status bar),
+  `data/paper_trades/journal.json` (new), `data/instruments/fo_universe.json` (new),
+  `data/health/.gitkeep` (new dir), `project_status.md` (new root file), `docs/project_status.md` (updated).
+- **Feature added:**
+  - **S2A** Root `project_status.md` quick-reference (phase summary, data quality baseline, accuracy baseline).
+  - **S2B** Paper trade journal: `_append_to_paper_journal()` after morning gates (OPEN entries), `_update_paper_journal_outcomes()` after post-market (CLOSED + outcome). Hypothetical trades excluded.
+  - **S2C** Daily health report: `_save_health_report()` in orchestrator after all fetches; FRESH/CACHED/FAILED per source; `overall` = HEALTHY/CACHED/DEGRADED/CRITICAL. Compact status bar added to dashboard between main metrics and DATA AVAILABILITY.
+  - **S2D** `src/backtesting/backtest_runner.py`: 60-day yfinance OHLCV, EMA20/EMA50/RSI14/vol_ratio rule-based signal (CALL/PUT/NEUTRAL), next-day direction accuracy, per-symbol + overall stats, saves `data/backtesting/results.json`. CLI: `python -m src.backtesting.backtest_runner [--symbol X Y] [--days N]`.
+  - **S2E** `data/instruments/fo_universe.json`: 20 F&O stocks + NIFTY + BANKNIFTY with lot_size, tick_size, strike_step, expiry_cycle.
+  - **S2F** Memory loop: `logger.info("Memory loaded from %s", past)` when file found; `logger.info("No memory available — fresh start")` when none found in last 7 days.
+- **Tests/checks:** Orchestrator edits are non-breaking additions; backtest runner is standalone. No test suite changes needed (pure new functionality).
+- **Remaining limitations:** Paper journal and health reports will be empty until next live 8 AM run. Backtest requires yfinance connectivity.
+- **Next step:** Phase 5 — wire live `_fetch()` in AngelOne/Kite providers; run `python -m src.backtesting.backtest_runner` to validate signals historically.
 
 ---
 

@@ -20,10 +20,11 @@ from src.analyzers.evaluation import (
     check_entry_trigger_met,
     audit_predictions_vs_triggers,
 )
-from src.fetchers.data_availability import check_data_availability
-from src.fetchers.intraday_loader   import list_intraday_files, save_uploaded_csv
-from src.fetchers.broker_config     import get_provider_config
-from src.analyzers.evaluation       import get_first_30min_range
+from src.fetchers.data_availability      import check_data_availability
+from src.fetchers.intraday_loader        import list_intraday_files, save_uploaded_csv
+from src.fetchers.broker_config          import get_provider_config
+from src.analyzers.evaluation            import get_first_30min_range
+from src.fetchers.intraday_csv_parser    import parse_candle_csv, compute_intraday_outcome
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -33,7 +34,7 @@ st.set_page_config(
     layout="wide",
     page_title="AI Trade Command",
     page_icon="🎯",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="auto",
 )
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,7 @@ ROOT      = Path(__file__).parent.parent.parent
 DATA_DIR  = ROOT / "data" / "processed"
 IST       = pytz.timezone("Asia/Kolkata")
 TODAY_STR = datetime.now(IST).strftime("%Y-%m-%d")
+_JOURNAL_PATH = ROOT / "data" / "paper_trades" / "journal.json"
 
 # Solid colors (never append alpha hex — breaks Plotly)
 C = {
@@ -90,6 +92,11 @@ st.markdown(f"""
   .stApp {{ background-color: {C["bg"]} !important; }}
   .block-container {{ padding-top: 0.5rem !important; }}
 
+  /* Body / general text */
+  .stApp, .stApp p, .stApp div, .stApp span {{
+    font-size: 14px !important;
+  }}
+
   /* Metric cards */
   div[data-testid="stMetric"] {{
     background-color: #0f150a !important;
@@ -99,14 +106,14 @@ st.markdown(f"""
     min-height: 90px !important;
   }}
   div[data-testid="stMetric"] label {{
-    color: #e8f5e9 !important;
+    color: #c8e6c9 !important;
     font-size: 15px !important;
     font-family: monospace !important;
     letter-spacing: 1px !important;
     text-transform: uppercase !important;
   }}
   div[data-testid="stMetric"] [data-testid="stMetricValue"] {{
-    font-size: 36px !important;
+    font-size: 48px !important;
     font-weight: 700 !important;
     color: {C["text"]} !important;
     font-family: monospace !important;
@@ -223,9 +230,9 @@ def _price_box(label: str, val, color: str) -> str:
     return (
         f'<div style="background:#0f0f0f;border:1px solid #2a3a2a;'
         f'border-radius:4px;padding:10px 8px;text-align:center;min-height:70px">'
-        f'<div style="font-size:12px;color:{C["text2"]};letter-spacing:1px;'
+        f'<div style="font-size:14px;color:#c8e6c9;letter-spacing:1px;'
         f'font-family:monospace;margin-bottom:4px">{label}</div>'
-        f'<div style="font-size:28px;font-weight:700;color:{color};'
+        f'<div style="font-size:24px;font-weight:700;color:{color};'
         f'font-family:monospace">{val}</div></div>'
     )
 
@@ -263,7 +270,7 @@ def make_bias_donut(confidence_breakdown: dict) -> go.Figure:
     labels = [label_map.get(k, k.upper()) for k in confidence_breakdown]
     values = list(confidence_breakdown.values())
     # Fixed palette cycling — valid plotly hex, no alpha (FIX 6)
-    _DONUT_PALETTE = ['#4caf50', '#ffc107', '#ff5252', '#3a5c2a']
+    _DONUT_PALETTE = ['#4caf50', '#ffc107', '#ff5252', '#c8e6c9']
     colors = [_DONUT_PALETTE[i % len(_DONUT_PALETTE)] for i in range(len(values))]
     avg    = sum(values) / len(values) if values else 0
 
@@ -438,6 +445,76 @@ def make_accuracy_bar(valid_log: list[dict]) -> go.Figure:
     layout["showlegend"] = False
     fig.update_layout(**layout)
     return fig
+
+
+# ---------------------------------------------------------------------------
+# SIDEBAR — Intraday candle CSV upload for outcome verification (TASK 3)
+# ---------------------------------------------------------------------------
+
+with st.sidebar:
+    st.markdown(
+        f'<div style="font-family:monospace;font-size:13px;font-weight:700;'
+        f'color:#8bc34a;letter-spacing:1px;margin-bottom:8px">INTRADAY OUTCOME CHECK</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption("Upload Zerodha Kite or TradingView 5m/15m CSV to verify today's paper trades.")
+
+    _sb_file = st.file_uploader(
+        "Candle CSV (Zerodha / TradingView)",
+        type=["csv"],
+        key="sidebar_candle_upload",
+        help="Columns accepted: Zerodha (date, time, open, high, low, close, volume) "
+             "or TradingView (time, open, high, low, close, volume)",
+    )
+
+    if _sb_file is not None:
+        _sb_result = parse_candle_csv(_sb_file.getvalue())
+        if _sb_result["errors"]:
+            for _e in _sb_result["errors"]:
+                st.error(f"CSV error: {_e}")
+        else:
+            _sb_df = _sb_result["df"]
+            st.success(
+                f"Parsed {len(_sb_df)} bars — format: {_sb_result['format_detected']}"
+            )
+            if _sb_result["warnings"]:
+                for _w in _sb_result["warnings"]:
+                    st.warning(_w)
+
+            # Load journal and compute outcomes for each open trade
+            if _JOURNAL_PATH.exists():
+                _sb_journal = json.loads(_JOURNAL_PATH.read_text(encoding="utf-8"))
+                _sb_trades  = [
+                    t for t in _sb_journal.get("trades", [])
+                    if t.get("date") == TODAY_STR
+                ]
+                if _sb_trades:
+                    st.markdown(
+                        f'<div style="font-family:monospace;font-size:11px;'
+                        f'color:#90a4ae;margin:8px 0 4px 0">TODAY\'S PAPER TRADES</div>',
+                        unsafe_allow_html=True,
+                    )
+                    for _sbt in _sb_trades:
+                        _oc = compute_intraday_outcome(_sb_df, _sbt)
+                        _oc_color = "#4caf50" if _oc.get("outcome") in (
+                            "TARGET_1_HIT","TARGET_2_HIT"
+                        ) else ("#ff5252" if _oc.get("outcome") == "SL_HIT" else "#ffc107")
+                        st.markdown(
+                            f'**{_sbt["symbol"]} {_sbt["signal"]}**  \n'
+                            f'Entry trigger: {"✓" if _oc.get("entry_triggered") else "✗"}  '
+                            f'SL hit: {"✓" if _oc.get("sl_hit") else "✗"}  '
+                            f'T1: {"✓" if _oc.get("t1_hit") else "✗"}  '
+                            f'T2: {"✓" if _oc.get("t2_hit") else "✗"}  \n'
+                            f'Close: {_oc.get("final_close","—")}  '
+                            f'**Outcome: {_oc.get("outcome","UNKNOWN")}**'
+                        )
+                else:
+                    st.info("No paper trades found for today.")
+            else:
+                st.info("No journal file found.")
+
+    st.markdown("---")
+    st.caption("Paper trades only — no live execution")
 
 
 # ---------------------------------------------------------------------------
@@ -636,6 +713,10 @@ st.markdown("---")
 # DATA AVAILABILITY — comprehensive layer status + quality warnings
 # ---------------------------------------------------------------------------
 
+_health_dir  = ROOT / "data" / "health"
+_health_path = _health_dir / f"health_{TODAY_STR}.json"
+_health      = json.loads(_health_path.read_text(encoding="utf-8")) if _health_path.exists() else None
+
 _dq       = derive_data_quality(meta, ctx)
 _da       = check_data_availability(meta)
 _da_layers = _da["layers"]
@@ -679,6 +760,34 @@ with _da_c2:
         f'letter-spacing:1px;margin-bottom:4px">MISSING / UNAVAILABLE ({len(_miss_layers)})</div>'
         f'<div style="background:#0a100a;border:1px solid {C["border"]};'
         f'padding:8px 10px;border-radius:3px">{_miss_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+# Health source status — compact pill row inside DATA AVAILABILITY
+if _health:
+    _hsrc  = _health.get("sources", {})
+    _hovrl = _health.get("overall", "UNKNOWN")
+    _h_color = {
+        "HEALTHY":  C["success"],
+        "CACHED":   C["amber"],
+        "DEGRADED": C["amber"],
+        "CRITICAL": C["red"],
+    }.get(_hovrl, C["neutral"])
+    _h_pills = "".join(
+        _pill(
+            f"{k.upper().replace('_', ' ')}: {v['status']}",
+            C["success"] if v["status"] == "FRESH" else (
+                C["amber"] if v["status"] == "CACHED" else C["red"]
+            ),
+            11,
+        )
+        for k, v in _hsrc.items()
+    )
+    st.markdown(
+        f'<div style="margin:8px 0 4px 0;font-size:11px;color:{C["text2"]};'
+        f'font-family:monospace;letter-spacing:1px">DATA HEALTH — {_health.get("time","?")} '
+        f'<span style="color:{_h_color};font-weight:700">[{_hovrl}]</span></div>'
+        f'<div style="margin-bottom:6px">{_h_pills}</div>',
         unsafe_allow_html=True,
     )
 
@@ -1107,9 +1216,9 @@ else:
                 _badge(gate_status, GATE_COLORS.get(gate_status, C["neutral"]), 12)
                 if gate_status != "TRADE_ALLOWED" else ""
             )
-            # FIX 2 — symbol at 28px bold
+            # symbol at 28px bold
             st.markdown(
-                f'<div style="font-size:32px;font-weight:bold;font-family:monospace;'
+                f'<div style="font-size:28px;font-weight:bold;font-family:monospace;'
                 f'color:{C["text"]};margin-bottom:6px">{sym}</div>'
                 + _badge(sig, sig_c, 13)
                 + _badge(f"STRIKE {t.get('strike','?')}", "#1a2e1a", 13)
@@ -1135,14 +1244,14 @@ else:
                 unsafe_allow_html=True,
             )
         with hc3:
-            # FIX 4 — confidence at 52px right-aligned
+            # confidence at 48px right-aligned
             st.markdown(
                 f'<div style="text-align:right">'
-                f'<div style="font-size:12px;color:{C["neutral"]};letter-spacing:1px;'
+                f'<div style="font-size:12px;color:#c8e6c9;letter-spacing:1px;'
                 f'font-family:monospace">CONFIDENCE</div>'
-                f'<div style="font-size:56px;font-weight:bold;color:{conf_c};'
+                f'<div style="font-size:48px;font-weight:bold;color:{conf_c};'
                 f'font-family:monospace;line-height:1">{conf}</div>'
-                f'<div style="font-size:12px;color:{C["neutral"]};font-family:monospace">/ 10</div>'
+                f'<div style="font-size:12px;color:#c8e6c9;font-family:monospace">/ 10</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -1508,7 +1617,155 @@ if trades_all or valid_log:
                 unsafe_allow_html=True,
             )
 
+    # Backtest summary
+    _bt_path = ROOT / "data" / "backtesting" / "results.json"
+    if _bt_path.exists():
+        _bt = json.loads(_bt_path.read_text(encoding="utf-8"))
+        _bt_valid = [s for s in _bt.get("per_symbol", []) if "error" not in s]
+        _bt_valid.sort(key=lambda x: x["accuracy_pct"], reverse=True)
+        _top3 = _bt_valid[:3]
+        _bot3 = _bt_valid[-3:]
+        st.markdown(
+            f'<div style="background:#0a100a;border:1px solid {C["border"]};'
+            f'border-left:3px solid {C["green"]};padding:10px 14px;'
+            f'font-family:monospace;font-size:13px;color:{C["text"]};margin-top:8px">'
+            f'<span style="color:{C["green"]};font-weight:700">[BACKTEST] </span>'
+            f'{_bt["days_requested"]}-day rule-based signals  |  '
+            f'<span style="color:{C["amber"]};font-weight:700">'
+            f'{_bt["overall_accuracy"]}% accuracy</span>  |  '
+            f'{_bt["total_correct"]}/{_bt["total_signals"]} signals correct  |  '
+            f'{_bt["symbols_ok"]}/{_bt["symbols_requested"]} symbols  '
+            f'<span style="color:{C["neutral"]};font-size:11px">(run: {_bt.get("run_date","")})</span><br>'
+            f'<span style="color:{C["success"]}">Top: '
+            + "  ".join(f'{s["symbol"]} {s["accuracy_pct"]}%' for s in _top3)
+            + f'</span>  <span style="color:{C["red"]}">Weak: '
+            + "  ".join(f'{s["symbol"]} {s["accuracy_pct"]}%' for s in _bot3)
+            + f'</span></div>',
+            unsafe_allow_html=True,
+        )
+
     st.markdown("---")
+
+# ---------------------------------------------------------------------------
+# PAPER TRADE JOURNAL
+# ---------------------------------------------------------------------------
+
+_journal_path = ROOT / "data" / "paper_trades" / "journal.json"
+st.markdown(_section_header("PAPER TRADE JOURNAL"), unsafe_allow_html=True)
+
+_TIER_PILL_COLOR = {
+    "PRIMARY_CANDIDATE":   C["success"],
+    "SECONDARY_CANDIDATE": C["amber"],
+    "WATCHLIST_REVIEW":    C["neutral"],
+    "HIGH":                C["success"],
+    "MID":                 C["amber"],
+    "LOW":                 C["red"],
+    "BELOW_FLOOR":         C["red"],
+}
+
+if _journal_path.exists():
+    _j = json.loads(_journal_path.read_text(encoding="utf-8"))
+    _jtrades = _j.get("trades", [])
+    if _jtrades:
+        # Build display table
+        _rows = []
+        for _jt in _jtrades:
+            _rows.append({
+                "Date":      _jt.get("date", ""),
+                "Symbol":    _jt.get("symbol", ""),
+                "Signal":    _jt.get("signal", ""),
+                "Conf":      _jt.get("confidence", ""),
+                "Eff Conf":  _jt.get("gate_effective_confidence", ""),
+                "Tier":      _jt.get("confidence_tier", ""),
+                "Entry":     _jt.get("entry_price", ""),
+                "SL":        _jt.get("stop_loss", ""),
+                "T1":        _jt.get("target_1", ""),
+                "T2":        _jt.get("target_2", ""),
+                "Status":    _jt.get("status", ""),
+                "Outcome":   (_jt.get("outcome") or "—").replace("_", " "),
+                "Direction": _jt.get("signal", ""),
+                "Notes":     ("PAPER" if _jt.get("paper_only") else ""),
+            })
+        _jdf = pd.DataFrame(_rows)
+        st.dataframe(_jdf, use_container_width=True, hide_index=True)
+
+        # Tier badges row
+        _tier_pills = "".join(
+            _pill(_jt.get("confidence_tier", ""), _TIER_PILL_COLOR.get(
+                _jt.get("confidence_tier", ""), C["neutral"]
+            ), 11)
+            for _jt in _jtrades
+        )
+        if _tier_pills:
+            st.markdown(
+                f'<div style="margin:4px 0 8px 0;font-size:11px;color:{C["text2"]};'
+                f'font-family:monospace">Confidence tiers: {_tier_pills}</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Running stats
+        _completed = [t for t in _jtrades if t.get("status") == "CLOSED"]
+        _pending   = [t for t in _jtrades if t.get("status") == "OPEN"]
+        _wins      = [t for t in _completed if t.get("outcome") in ("TARGET_1_HIT", "TARGET_2_HIT")]
+        _t1_hits   = [t for t in _completed if t.get("outcome") == "TARGET_1_HIT"]
+        _confs     = [t.get("gate_effective_confidence") for t in _jtrades
+                      if isinstance(t.get("gate_effective_confidence"), (int, float))]
+        _avg_conf  = round(sum(_confs) / len(_confs), 2) if _confs else None
+        _tier_counts = {}
+        for _t in _jtrades:
+            _tc = _t.get("confidence_tier", "—")
+            _tier_counts[_tc] = _tier_counts.get(_tc, 0) + 1
+
+        _tier_str = "  ".join(
+            _pill(f"{k}: {v}", _TIER_PILL_COLOR.get(k, C["neutral"]), 11)
+            for k, v in _tier_counts.items()
+        )
+        _win_pct = (
+            f"{len(_wins)/len(_completed)*100:.0f}%"
+            if _completed else "—"
+        )
+        _t1_pct = (
+            f"{len(_t1_hits)/len(_completed)*100:.0f}%"
+            if _completed else "—"
+        )
+
+        _stats_html = (
+            f'<div style="background:{C["card"]};border:1px solid {C["border"]};'
+            f'padding:10px 14px;font-family:monospace;font-size:13px;'
+            f'color:{C["text"]};margin-top:8px;line-height:1.8">'
+            f'Total: <b>{len(_jtrades)}</b>  |  '
+            f'Completed: <b>{len(_completed)}</b>  |  '
+            f'Pending: <b>{len(_pending)}</b>  |  '
+            f'Win% (T1+T2): <b>{_win_pct}</b>  |  '
+            f'T1 hit%: <b>{_t1_pct}</b>  |  '
+            f'Avg conf: <b>{_avg_conf if _avg_conf is not None else "—"}</b>'
+            f'<br>Tiers: {_tier_str}'
+        )
+        if len(_completed) < 10:
+            _needed = 10 - len(_completed)
+            _stats_html += (
+                f'<br><span style="color:{C["amber"]}">'
+                f'collecting data — {len(_completed)} of 10 trades needed '
+                f'({_needed} more to go)</span>'
+            )
+        _stats_html += "</div>"
+        st.markdown(_stats_html, unsafe_allow_html=True)
+    else:
+        st.markdown(
+            f'<div style="background:{C["card"]};border:1px solid {C["border"]};'
+            f'padding:14px;font-family:monospace;font-size:14px;color:{C["neutral"]}">'
+            f'[EMPTY] Journal exists but contains no trades yet.</div>',
+            unsafe_allow_html=True,
+        )
+else:
+    st.markdown(
+        f'<div style="background:{C["card"]};border:1px solid {C["border"]};'
+        f'padding:14px;font-family:monospace;font-size:14px;color:{C["neutral"]}">'
+        f'[PENDING] Paper trade journal will appear after the first morning analysis run.</div>',
+        unsafe_allow_html=True,
+    )
+
+st.markdown("---")
 
 # ---------------------------------------------------------------------------
 # 9:00 AM PRE-OPEN CONFIRMATION

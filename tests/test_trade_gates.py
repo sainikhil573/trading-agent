@@ -50,10 +50,15 @@ def _bn_sig(pcr=1.0, mp_gap=None, mp_direction=None):
     }
 
 
-def _dq(flags=None, missing_layers=None):
+def _dq(flags=None, missing_layers=None, is_premarket=True, has_fallback=False):
     flags          = flags or []
     missing_layers = missing_layers or []
-    return {"flags": flags, "missing_layers": missing_layers}
+    return {
+        "flags":             flags,
+        "missing_layers":    missing_layers,
+        "is_premarket":      is_premarket,
+        "has_fallback_data": has_fallback,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -148,10 +153,17 @@ class TestMaxPainConflict:
 
 class TestVolumeGate:
     def test_low_volume_flagged(self):
-        trade = _trade(vol_score=3)
+        # VOLUME_SCORE_MIN is 3; score of 2 is below threshold
+        trade = _trade(vol_score=2)
         is_low, score = check_volume_gate(trade)
         assert is_low is True
-        assert score == 3.0
+        assert score == 2.0
+
+    def test_volume_at_min_threshold_not_flagged(self):
+        # score == MIN (3) is now acceptable
+        trade = _trade(vol_score=3)
+        is_low, _ = check_volume_gate(trade)
+        assert is_low is False
 
     def test_volume_at_threshold_not_flagged(self):
         trade = _trade(vol_score=5)
@@ -184,15 +196,19 @@ class TestGateTrade:
         assert gated["gate_effective_confidence"] == 8.0
         assert gated["gate_data_penalty"] == 0.0
 
-    def test_data_insufficient_blocks_when_both_layers_missing(self):
-        """Both FII/DII and Participant OI missing → DATA_INSUFFICIENT hard block."""
+    def test_both_layers_missing_premarket_applies_penalty_only(self):
+        """Gate 1 (DATA_INSUFFICIENT) removed — both layers missing now applies soft penalty only.
+        Pre-market cap = 0.3 total. confidence 9.0 − 0.3 = 8.7 → TRADE_ALLOWED."""
         dq    = _dq(
             flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"],
             missing_layers=["Institutional Flow", "Smart Money OI"],
+            is_premarket=True,
         )
         trade = _trade(confidence=9.0)
         gated = gate_trade(trade, _nifty_sig(), _bn_sig(), dq)
-        assert gated["gate_status"] == "DATA_INSUFFICIENT"
+        assert gated["gate_status"] == "TRADE_ALLOWED"
+        assert gated["gate_data_penalty"] == pytest.approx(0.3)
+        assert gated["gate_effective_confidence"] == pytest.approx(8.7)
 
     def test_pcr_conflict_blocks_put(self):
         trade = _trade(signal="PUT", confidence=8.5)
@@ -210,23 +226,31 @@ class TestGateTrade:
         assert gated["gate_status"] == "CONFLICTING_SIGNALS"
 
     def test_fii_missing_reduces_confidence(self):
-        """One missing layer → -0.5 confidence penalty applied."""
-        dq    = _dq(flags=["FII_DII_DATA_ZERO"], missing_layers=[])
+        """One missing layer pre-market → -0.3 confidence penalty (capped at 0.3 total)."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO"], missing_layers=[], is_premarket=True)
         trade = _trade(confidence=7.4, vol_score=6)
         gated = gate_trade(trade, _nifty_sig(), _bn_sig(), dq)
-        assert gated["gate_data_penalty"] == 0.5
-        assert gated["gate_effective_confidence"] == pytest.approx(6.9)
+        assert gated["gate_data_penalty"] == pytest.approx(0.3)
+        assert gated["gate_effective_confidence"] == pytest.approx(7.1)
 
-    def test_fii_missing_drops_below_floor_becomes_no_trade(self):
-        """Confidence 7.4 − 0.5 (FII missing) = 6.9 < 7.0 → NO_TRADE."""
-        dq    = _dq(flags=["FII_DII_DATA_ZERO"], missing_layers=[])
+    def test_fii_missing_premarket_still_allows_trade(self):
+        """Pre-market: 7.4 − 0.3 = 7.1 ≥ 7.0 → TRADE_ALLOWED (timing issue, not data failure)."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO"], missing_layers=[], is_premarket=True)
         trade = _trade(confidence=7.4, vol_score=6)
         gated = gate_trade(trade, _nifty_sig(), _bn_sig(), dq)
+        assert gated["gate_status"] == "TRADE_ALLOWED"
+
+    def test_fii_missing_postmarket_blocks_low_confidence(self):
+        """Post-market: 7.4 − 0.7 = 6.7 < 7.0 → NO_TRADE (data should be available)."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO"], missing_layers=[], is_premarket=False)
+        trade = _trade(confidence=7.4, vol_score=6)
+        gated = gate_trade(trade, _nifty_sig(), _bn_sig(), dq)
+        assert gated["gate_data_penalty"] == pytest.approx(0.7)
         assert gated["gate_status"] == "NO_TRADE"
 
     def test_low_volume_caps_confidence(self):
-        """Volume score 3 < 5 → cap to 6.8 → if that drops below 7.0 → NO_TRADE."""
-        trade = _trade(confidence=9.0, vol_score=3)
+        """Volume score 2 < 3 (MIN) → cap to 6.8 → below 7.0 → NO_TRADE."""
+        trade = _trade(confidence=9.0, vol_score=2)
         gated = gate_trade(trade, _nifty_sig(), _bn_sig(), _dq())
         assert gated["gate_confidence_cap"] == 6.8
         assert gated["gate_effective_confidence"] == 6.8
@@ -245,12 +269,12 @@ class TestGateTrade:
         gated = gate_trade(trade, _nifty_sig(), _bn_sig(), dq)
         assert gated["gate_original_confidence"] == 9.0
 
-    def test_data_insufficient_takes_priority_over_pcr(self):
-        """Gate 1 (DATA_INSUFFICIENT) should fire before Gate 2 (PCR)."""
+    def test_pcr_conflict_takes_priority_when_gate1_removed(self):
+        """Gate 1 removed — PCR conflict (Gate 2) fires when PCR is extreme."""
         dq    = _dq(missing_layers=["FII", "OI"])
         trade = _trade(signal="PUT", confidence=8.0)
         gated = gate_trade(trade, _nifty_sig(pcr=1.5), _bn_sig(), dq)
-        assert gated["gate_status"] == "DATA_INSUFFICIENT"
+        assert gated["gate_status"] == "CONFLICTING_SIGNALS"
 
     def test_no_trade_when_effective_confidence_below_floor(self):
         """Confidence 6.8 < 7.0 → NO_TRADE even with good data."""
@@ -310,12 +334,12 @@ class TestApplyTradeGates:
         assert result["_gate_summary"]["allowed"] == 0
 
     def test_data_penalty_in_summary(self):
-        """FII + OI both missing → 1.0 total penalty reflected in gate_summary."""
+        """Pre-market: FII + OI both missing → total penalty capped at 0.3."""
         dq    = _dq(flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"],
-                    missing_layers=["FII", "OI"])
+                    missing_layers=["FII", "OI"], is_premarket=True)
         brief  = self._make_brief([_trade(confidence=9.0)])
         result = apply_trade_gates(brief, dq, _nifty_sig(), _bn_sig())
-        assert result["_gate_summary"]["data_penalty"] == 1.0
+        assert result["_gate_summary"]["data_penalty"] == pytest.approx(0.3)
 
 
 # ---------------------------------------------------------------------------
@@ -331,30 +355,41 @@ class TestGateStockTrade:
         assert gated["gate_effective_confidence"] == 8.0
         assert gated["gate_data_penalty"] == 0.0
 
-    def test_stock_trade_gated_when_data_penalty_drops_below_floor(self):
-        """Confidence 7.3 − 1.0 (FII+OI penalty) = 6.3 < 7.0 → NO_TRADE."""
-        dq    = _dq(flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"])
+    def test_stock_trade_gated_postmarket_penalty_drops_below_floor(self):
+        """Post-market: confidence 7.3 − 0.7 (FII+OI penalty) = 6.6 < 7.0 → NO_TRADE."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"],
+                    is_premarket=False)
         trade = {"symbol": "HDFCBANK", "signal": "PUT", "confidence": 7.3}
         gated = gate_stock_trade(trade, dq)
         assert gated["gate_status"] == "NO_TRADE"
-        assert gated["gate_effective_confidence"] == pytest.approx(6.3)
-        assert gated["gate_data_penalty"] == 1.0
+        assert gated["gate_effective_confidence"] == pytest.approx(6.6)
+        assert gated["gate_data_penalty"] == pytest.approx(0.7)
+
+    def test_stock_trade_premarket_penalty_allows_high_confidence(self):
+        """Pre-market: confidence 7.3 − 0.3 (cap) = 7.0 → TRADE_ALLOWED."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"],
+                    is_premarket=True)
+        trade = {"symbol": "HDFCBANK", "signal": "PUT", "confidence": 7.3}
+        gated = gate_stock_trade(trade, dq)
+        assert gated["gate_status"] == "TRADE_ALLOWED"
+        assert gated["gate_data_penalty"] == pytest.approx(0.3)
 
     def test_stock_trade_survives_high_confidence_with_penalty(self):
-        """Confidence 8.5 − 1.0 = 7.5 ≥ 7.0 → TRADE_ALLOWED even with full penalty."""
-        dq    = _dq(flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"])
+        """Pre-market: confidence 8.5 − 0.3 = 8.2 ≥ 7.0 → TRADE_ALLOWED."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"],
+                    is_premarket=True)
         trade = {"symbol": "RELIANCE", "signal": "CALL", "confidence": 8.5}
         gated = gate_stock_trade(trade, dq)
         assert gated["gate_status"] == "TRADE_ALLOWED"
-        assert gated["gate_effective_confidence"] == pytest.approx(7.5)
+        assert gated["gate_effective_confidence"] == pytest.approx(8.2)
 
     def test_stock_trade_partial_penalty(self):
-        """Only FII/DII missing → −0.5 penalty applied."""
-        dq    = _dq(flags=["FII_DII_DATA_ZERO"])
+        """Pre-market, only FII/DII missing → −0.3 penalty applied."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO"], is_premarket=True)
         trade = {"symbol": "TCS", "signal": "CALL", "confidence": 7.6}
         gated = gate_stock_trade(trade, dq)
-        assert gated["gate_data_penalty"] == 0.5
-        assert gated["gate_effective_confidence"] == pytest.approx(7.1)
+        assert gated["gate_data_penalty"] == pytest.approx(0.3)
+        assert gated["gate_effective_confidence"] == pytest.approx(7.3)
         assert gated["gate_status"] == "TRADE_ALLOWED"
 
     def test_stock_gate_preserves_original_fields(self):
@@ -410,11 +445,12 @@ class TestPostGateConsistency:
         assert result["trades_gated_out"][0]["symbol"] == "BANKNIFTY"
 
     def test_stock_trades_go_through_gates(self):
-        """Stock trades with borderline confidence are gated when data is missing."""
-        dq    = _dq(flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"])
+        """Post-market: borderline confidence blocked; high confidence allowed."""
+        dq    = _dq(flags=["FII_DII_DATA_ZERO", "PARTICIPANT_OI_MISSING"],
+                    is_premarket=False)  # post-market: 0.7 cap
         brief = self._brief(stock_trades=[
-            _stock_trade("BAJFINANCE", confidence=7.3),   # 7.3 − 1.0 = 6.3 → blocked
-            _stock_trade("RELIANCE",   confidence=8.5),   # 8.5 − 1.0 = 7.5 → allowed
+            _stock_trade("BAJFINANCE", confidence=7.3),   # 7.3 − 0.7 = 6.6 → blocked
+            _stock_trade("RELIANCE",   confidence=8.5),   # 8.5 − 0.7 = 7.8 → allowed
         ])
         result = apply_trade_gates(brief, dq, _nifty_sig(), _bn_sig())
         stock_syms = [t["symbol"] for t in result["stock_trades"]]
@@ -472,12 +508,13 @@ class TestPostGateConsistency:
         assert result["_gate_summary"]["final_recommendation_status"] == "ACTIONABLE_TRADES_AVAILABLE"
 
     def test_final_status_no_actionable_when_all_blocked(self):
-        """final_recommendation_status must be NO_ACTIONABLE_TRADE when nothing passes."""
-        dq    = _dq(flags=["FII_DII_DATA_ZERO"])
-        brief = self._brief(trades=[_trade(confidence=7.4, vol_score=6)])
+        """NO_ACTIONABLE_TRADE when confidence too low even after pre-market penalty."""
+        # 6.9 − 0.3 = 6.6 < 7.0 → blocked
+        dq    = _dq(flags=["FII_DII_DATA_ZERO"], is_premarket=True)
+        brief = self._brief(trades=[_trade(confidence=6.9, vol_score=6)])
         result = apply_trade_gates(brief, dq, _nifty_sig(), _bn_sig())
         status = result["_gate_summary"]["final_recommendation_status"]
-        assert status in ("NO_ACTIONABLE_TRADE", "DATA_INSUFFICIENT")
+        assert status == "NO_ACTIONABLE_TRADE"
 
     def test_total_actionable_in_gate_summary(self):
         """_gate_summary.total_actionable must equal allowed index + actionable stock."""
