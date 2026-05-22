@@ -700,11 +700,16 @@ _fii_unavailable = (
     _fii_dii_raw.get("fii_net_buy") == 0.0
     and _fii_dii_raw.get("dii_net_buy") == 0.0
 )
+_fii_prev_day    = _fii_dii_raw.get("is_prev_day", False)
+_fii_fallback_dt = _fii_dii_raw.get("fallback_date", "")
 mc[6].metric("FII NET (Cr)",
              "Unavailable" if _fii_unavailable else (
                  f"₹{fii_net:+,.0f}" if isinstance(fii_net, (int,float)) else "—"
              ),
-             delta="pre-market zero" if _fii_unavailable else None,
+             delta=(
+                 "pre-market zero" if _fii_unavailable else
+                 (f"prev-day: {_fii_fallback_dt}" if _fii_prev_day else None)
+             ),
              delta_color="off")
 
 st.markdown("---")
@@ -1134,6 +1139,31 @@ if cue_list:
         gcols[i].markdown(
             _cue_card(lbl, d.get("last", 0), d.get("pct_change") or 0,
                       invert=lbl in INVERT_LABELS),
+            unsafe_allow_html=True,
+        )
+
+    # Opening gap / GIFT Nifty source line
+    _og = cues.get("opening_gap", {})
+    if _og and _og.get("value") is not None:
+        _src_map = {
+            "gift_nifty":  "GIFT Nifty (NSE API)",
+            "nsei_proxy":  "^NSEI proxy (yfinance — GIFT unavailable)",
+            "sp500_proxy": "ES=F proxy (S&P 500 Futures — regional markets closed)",
+        }
+        _og_src   = _og.get("source", "unknown")
+        _og_label = _src_map.get(_og_src, _og_src)
+        _og_val   = _og.get("value", 0)
+        _og_pct   = _og.get("pct_change", 0) or 0
+        _og_color = C["success"] if _og_pct >= 0 else C["red"]
+        _og_arrow = "+" if _og_pct >= 0 else ""
+        _og_src_color = C["success"] if _og_src == "gift_nifty" else C["amber"]
+        st.markdown(
+            f'<div style="background:{C["card"]};border-left:3px solid {_og_src_color};'
+            f'padding:6px 12px;font-family:monospace;font-size:12px;color:{C["text2"]};margin:4px 0">'
+            f'<span style="color:{_og_src_color};font-weight:700">[OPENING GAP] </span>'
+            f'Nifty indicative: <span style="color:#fff;font-weight:700">{_og_val:,.1f}</span> '
+            f'<span style="color:{_og_color}">({_og_arrow}{_og_pct:.2f}%)</span>  '
+            f'<span style="color:{C["neutral"]}">Source: {_og_label}</span></div>',
             unsafe_allow_html=True,
         )
 
@@ -1750,6 +1780,52 @@ if _journal_path.exists():
             )
         _stats_html += "</div>"
         st.markdown(_stats_html, unsafe_allow_html=True)
+
+        # Signal quality expandable row detail
+        _sq_path = ROOT / "data" / "analytics" / "signal_quality.json"
+        _sq_map  = {}
+        if _sq_path.exists():
+            try:
+                _sq_data = json.loads(_sq_path.read_text(encoding="utf-8"))
+                for _sq in _sq_data.get("trades", []):
+                    _sq_key = f"{_sq.get('date','')}-{_sq.get('symbol','')}"
+                    _sq_map[_sq_key] = _sq
+            except Exception:
+                pass
+
+        if _sq_map:
+            st.markdown(
+                f'<div style="font-size:11px;color:{C["text2"]};font-family:monospace;'
+                f'letter-spacing:1px;margin:8px 0 4px 0">SIGNAL QUALITY DETAILS</div>',
+                unsafe_allow_html=True,
+            )
+            for _jt in _jtrades:
+                _sq_key = f"{_jt.get('date','')}-{_jt.get('symbol','')}"
+                _sq = _sq_map.get(_sq_key)
+                if not _sq:
+                    continue
+                _sq_oq    = _sq.get("outcome_quality", "—")
+                _sq_color = {
+                    "CLEAN_WIN":      C["success"],
+                    "PENDING":        C["amber"],
+                    "STOPPED_OUT":    C["red"],
+                    "SCRATCHED":      C["neutral"],
+                    "OUTCOME_UNKNOWN": C["neutral"],
+                }.get(_sq_oq, C["neutral"])
+                _sq_label = f"{_jt.get('symbol','')} {_jt.get('signal','')} [{_jt.get('date','')}]"
+                with st.expander(_sq_label):
+                    _sq_cols = st.columns(4)
+                    _sq_cols[0].metric("Outcome Quality", _sq_oq)
+                    _sq_cols[1].metric("Best PnL",
+                        f"+{_sq['best_case_pnl']:.2f}" if _sq.get("best_case_pnl") is not None else "—")
+                    _sq_cols[2].metric("Worst PnL",
+                        f"{_sq['worst_case_pnl']:.2f}" if _sq.get("worst_case_pnl") is not None else "—")
+                    _sq_cols[3].metric("Intraday", "Yes" if _sq.get("intraday_available") else "No")
+                    if _sq.get("time_to_sl") is not None:
+                        st.caption(f"SL hit at: {_sq['time_to_sl']} min from open")
+                    if _sq.get("time_to_t1") is not None:
+                        st.caption(f"T1 hit at: {_sq['time_to_t1']} min from open")
+
     else:
         st.markdown(
             f'<div style="background:{C["card"]};border:1px solid {C["border"]};'

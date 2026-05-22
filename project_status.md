@@ -2,36 +2,42 @@
 
 > Full history: `docs/project_status.md`
 
-## Phase: S2 Paper Validation + Diagnostics
+---
 
-### S1 Stabilization: COMPLETE
-All 7 critical fixes applied. Gates working. FII/DII fallbacks implemented.
-Pre-market penalty capped at -0.3. Volume threshold lowered to ≥0.3.
+## Last Run: 2026-05-22  19:17 IST
 
-### Backtest Baseline (diagnostic only — 30-day rule-based signals)
-- Overall accuracy: 44.9% (83/185 signals) — below 50% random baseline
-- Candidate outperformers **(NON-CONCLUSIVE):** KOTAKBANK 78.6%, HINDALCO 61.1%, ADANIENT 56.2%
-- Weak performers **(KEPT IN UNIVERSE, labeled WATCHLIST_REVIEW):** AXISBANK 0%, LT/RELIANCE 25%
-- **Sample sizes too small for permanent pruning decisions**
-- All tiers generate signals and appear on dashboard; WATCHLIST_REVIEW stocks labeled clearly
+**Market:** MIXED  |  VIX zone: NORMAL  |  Risk: MEDIUM
+**Gates:** 0 allowed, 2 blocked  |  Penalty: -0.3  |  Status: ACTIONABLE_TRADES_AVAILABLE
 
-### Current Paper Trades
-- 1 trade open: WIPRO CALL (confidence 7.3 → 7.0 effective, LOW tier, paper_only=true)
-- Next milestone: 10 clean graded paper trades to validate gate system
+## Trades Fired Today
 
-### Out of Scope
-Live execution, broker API, ML scoring, auto-threshold changes, aggressive pruning
+  - WIPRO CALL  conf=7.8  eff=7.5  [TRADE_ALLOWED]
+  - HINDALCO CALL  conf=7.5  eff=7.2  [TRADE_ALLOWED]
 
-## Data Health (last 8 AM run)
-Updated automatically after each morning analysis run.
+**Gated out:** ICICIBANK CALL (NO_TRADE), DRREDDY CALL (NO_TRADE), ADANIENT PUT (NO_TRADE)
+
+## Data Health
+
+[DEGRADED]  VIX: FRESH  |  FII_DII: FAILED  |  PARTICIPANT_OI: FAILED  |  OPTION_CHAIN: FRESH  |  GLOBAL_CUES: FRESH  |  TECHNICALS: FRESH  |  NEWS: FRESH
 
 ## Running Accuracy
-Updated automatically after each post-market run.
-Only `hypothetical: false` entries counted — pre-S3 stale entries excluded.
+
+No trades tracked yet
+
+---
+
+## Phase Summary
+
+| Phase | Status |
+|-------|--------|
+| Phase 1–3 + PR1–PR7 | Done |
+| 7 Critical Fixes | Done |
+| S2 (journal, health, backtest, fo_universe, memory) | Done |
+| S3 (FII fix, instrument master, intraday outcome, backtest run) | Done |
 
 ## Next Steps
-1. Accumulate 10 graded paper trades (gate system validation)
-2. Run backtest again at 60 days for statistically meaningful sample
-3. Phase 5: Wire live AngelOne/Kite intraday fetch
-4. Fix RSS news feeds (ET Markets syntax error, Moneycontrol 503)
-5. FII/DII cache seeds automatically after next 3:30 PM post-market run
+
+1. Run backtest: `python -m src.backtesting.backtest_runner --days 30`
+2. Phase 5: Wire live AngelOne / Kite `_fetch()` for intraday candles
+3. News RSS: Fix ET Markets / Moneycontrol feed URLs
+4. FII/DII: Cache seeds after next 3:30 PM post-market run
