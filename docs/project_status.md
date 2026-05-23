@@ -14,20 +14,51 @@ dashboard display, and post-market accuracy tracking using Claude API.
 
 ## Current Stage
 
-**S2 features complete (main branch, 2026-05-22):**
-7 critical fixes + S2A–S2F:
-- S2A: Root `project_status.md` quick-reference file
-- S2B: Paper trade journal (`data/paper_trades/journal.json`) auto-populated after morning analysis, outcomes written after 3:30 PM
-- S2C: Daily health report (`data/health/health_YYYY-MM-DD.json`) — FRESH/CACHED/FAILED per source, compact bar in dashboard
-- S2D: Backtesting foundation (`src/backtesting/backtest_runner.py`) — 60-day rule-based EMA/RSI signal vs actual
-- S2E: F&O universe JSON (`data/instruments/fo_universe.json`) — 20 stocks + indices, lot/tick/strike
-- S2F: Memory loop now logs "Memory loaded from YYYY-MM-DD" or "No memory available — fresh start"
-`src/fetchers/instrument_master.py` provides a local CSV-based lookup system that translates
-human-readable symbols (NIFTY, RELIANCE) into broker-specific tokens (Kite `instrument_token`,
-Angel One `symbol_token`) before any fetch attempt. Both provider stubs now perform token
-lookup rather than logging a generic "not implemented" warning, returning empty DataFrame
-with a clear diagnostic when token is missing. Dashboard DATA AVAILABILITY section shows
-instrument master load status and per-index token readiness. No live API calls made in this branch.
+**Phase: S4 Paper Collection UX + Stability (branch: feature/s4-paper-collection-and-polish, 2026-05-22)**
+
+S2 validation dashboard: COMPLETE (330 tests → 356 tests after S3).
+
+### S2 Verification Results (2026-05-22)
+- V1: ALL PASS — fo_universe.json tiers ✓, journal WIPRO CALL+confidence_tier ✓, health dir ✓, fetch_opening_gap source ✓
+- V2: 330/330 tests PASS, 2 skipped
+- V3: Morning pipeline ran — health DEGRADED (FII/DII+ParticipantOI unavailable, no cache yet)
+- V4: 30-day backtest = 45.4% (baseline 44.9% ✓), 60-day = 50.2%, no regression
+
+### 60-day vs 30-day Backtest Comparison
+- 30-day overall: 45.4% | 60-day overall: 50.2%
+- 12 of 19 symbols agree on tier across both timeframes
+- fo_universe.json tier changes (both timeframes agree): HDFCBANK WATCHLIST→SECONDARY, TATASTEEL SECONDARY→WATCHLIST
+- Disagreements (not changed): KOTAKBANK, BAJFINANCE, WIPRO, TCS, SBIN, AXISBANK, MARUTI
+- Extended results: `data/backtesting/results_60d.json`
+
+### Memory Loop Status
+- Confirmed working: looks back 7 days for post_market files
+- Current: "No memory available — fresh start" (no post_market files yet — first run)
+- Will start loading after first 3:30 PM post-market run
+
+### Paper Trades Collected
+- Current count: 2 (WIPRO CALL [OPEN], HINDALCO CALL [OPEN])
+- Next milestone: 10 graded trades (need 8 more closed + graded)
+
+### S3 Features (complete)
+- Signal quality analytics: `src/analytics/signal_quality.py` — time_to_sl, time_to_t1, best/worst PnL, outcome_quality
+- Premarket checklist: `src/validators/premarket_checklist.py` — VIX/health/trading-day/layer-freshness gates
+- Telegram formatter: `src/alerts/telegram_formatter.py` — GO/NO_TRADE/DATA_DEGRADED formatted (not sent yet)
+- Dashboard: signal quality expandable rows, GIFT Nifty source label, FII prev-day date label
+- Telegram: formatter built, sending pending 10 clean paper trades
+- Pending alerts: `data/alerts/pending_alerts_YYYY-MM-DD.json`
+
+### S4 Features (current)
+- Windows Task Scheduler integration: `setup_task_scheduler.bat` (creates task at 22:30 EST Mon-Fri), `trading-agent-auto.bat` (silent auto run → logs to logs/auto_run_YYYY-MM-DD.log), `check_scheduler.bat` (status checker). Auto-mode in `main.py`: `not sys.stdin.isatty()` → skip menu, run morning analysis, exit 0/1.
+- FIX 1: Windows UTF-8 console encoding — `sys.stdout.reconfigure(encoding='utf-8', errors='replace')` in `main.py`
+- FIX 2: Health scoring thresholds — HEALTHY(≥5 fresh), CACHED(≥5 w/ CACHED), PARTIAL(3-4), DEGRADED(1-2), CRITICAL(0)
+  Pre-market FII/DII absence (2 sources) no longer triggers DEGRADED (was too aggressive)
+- TASK 1: Morning action checklist in sidebar (5 session-only checkboxes; green all-done / amber partial)
+- TASK 2: Manual paper trade entry form in sidebar (symbol from PRIMARY/SECONDARY universe, CALL/PUT, strike, expiry, premium, notes)
+- TASK 3: Close trade button in sidebar (select OPEN trade → exit price + reason → auto-computes P&L, writes CLOSED to journal)
+- TASK 4: 10-trade milestone progress bar in paper trade journal section (red/amber/green; label shows Telegram unlock milestone)
+- TASK 5: Backtest v2 (`src/backtesting/backtest_runner_v2.py`) — conservative RSI bounds (CALL: RSI 50-70, PUT: RSI 30-50), vol_ratio≥0.4, no EMA50 required. Saves `results_60d_v2.json`.
+- TASK 6: Windows .bat launchers — `trading-agent.bat` (scheduled), `trading-agent-manual.bat` (interactive menu)
 
 ---
 
@@ -209,12 +240,15 @@ src/dashboard/app.py      — Streamlit UI: morning brief, pre-open, post-market
 
 | Priority | Phase | Description |
 |----------|-------|-------------|
+| **In Progress** | **S3 — Paper collection** | Accumulate 10 graded paper trades (currently 2 open). Signal quality + checklist + Telegram formatter ready. |
+| High | **Telegram bot** | Connect TELEGRAM_BOT_TOKEN after 10 clean paper trades are graded |
 | High | **Phase 5 — Live intraday wiring** | Wire Angel One or Kite `_fetch()` with real SmartConnect/KiteConnect calls (token lookup layer is ready) |
 | High | **Phase 6 — GIFT Nifty** | Add dedicated GIFT Nifty source (IBKR or broker API) |
 | Medium | **Phase 7 — Backtesting** | Build a replay pipeline using NSE Bhavcopy + option chain archives |
-| Medium | **Phase 8 — Alerts** | Telegram/email alerts for GO/WAIT/SKIP decisions at 9:00 AM |
 | Low | **Phase 9 — Multi-expiry** | Track weekly + monthly expiry trades separately in accuracy log |
 | Low | **Phase 10 — Auto-login (Kite)** | Automate Kite daily access-token refresh via login flow |
+
+**Out of scope (current phase):** live execution, ML-based signal enhancement, auto-pruning of F&O universe.
 
 ---
 
@@ -518,3 +552,48 @@ src/dashboard/app.py      — Streamlit UI: morning brief, pre-open, post-market
   live `_fetch()` calls not yet implemented.
 - **Next step:** Phase 5 — implement live `_fetch()` in AngelOne/Kite providers using
   resolved tokens + SmartConnect / KiteConnect API calls.
+
+---
+
+### 2026-05-22 | S4 — Paper collection UX and stability | `feature/s4-paper-collection-and-polish`
+
+- **Branch:** `feature/s4-paper-collection-and-polish`
+- **Files changed:** `main.py` (UTF-8 stdout fix), `src/orchestrator.py` (health scoring thresholds),
+  `src/dashboard/app.py` (action checklist, manual trade form, close trade form, progress bar, PARTIAL color),
+  `src/backtesting/backtest_runner_v2.py` (new), `trading-agent.bat` (new), `trading-agent-manual.bat` (new),
+  `docs/project_status.md` (this entry), `tests/test_s4_paper_ux.py` (new).
+- **Feature added:**
+  - FIX 1: `sys.stdout.reconfigure(encoding='utf-8', errors='replace')` prevents cp1252 crash on Windows when Claude output contains → or — characters.
+  - FIX 2: Health scoring now uses n_available (7 − n_failed): ≥5→HEALTHY/CACHED, 3-4→PARTIAL, 1-2→DEGRADED, 0→CRITICAL. Pre-market FII/DII absence (2 out of 7 sources) yields HEALTHY/CACHED instead of DEGRADED.
+  - Dashboard sidebar: morning action checklist (5 manual checkboxes, session-only); manual paper trade form (symbol from PRIMARY/SECONDARY, CALL/PUT, strike, expiry, premium, notes → appends to journal); close trade form (select OPEN trade, enter exit price + reason → computes P&L, writes CLOSED).
+  - Dashboard: 10-trade milestone progress bar with red/amber/green color banding and "Telegram activates at 10" label.
+  - Backtest v2: conservative RSI bounds (CALL RSI 50-70, PUT RSI 30-50), vol_ratio≥0.4, EMA50 alignment removed. Diagnostic only — live signal logic unchanged.
+  - Windows launchers: `trading-agent.bat` runs scheduler; `trading-agent-manual.bat` shows 5-option menu.
+- **Tests/checks:** tests/test_s4_paper_ux.py covers health thresholds, manual trade append, close trade P&L, backtest v2 signal rules, .bat file existence.
+- **Remaining limitations:** 2 paper trades (need 10 closed for tier accuracy). No Telegram bot yet. Live broker `_fetch()` not wired.
+- **Next step:** Accumulate 10 graded paper trades. Then connect Telegram bot.
+
+---
+
+### 2026-05-22 | S3 — Signal quality analytics and paper collection | `feature/s3-validation-and-next-steps`
+
+- **Branch:** `feature/s3-validation-and-next-steps`
+- **Files changed:** `src/analytics/signal_quality.py` (new), `src/validators/premarket_checklist.py` (new),
+  `src/alerts/telegram_formatter.py` (new), `src/analytics/__init__.py` (new), `src/validators/__init__.py` (new),
+  `src/alerts/__init__.py` (new), `src/orchestrator.py` (S3 wiring: signal_quality, premarket_checklist, telegram_formatter),
+  `src/dashboard/app.py` (signal quality expandable rows, opening gap source label, FII prev-day date label),
+  `data/instruments/fo_universe.json` (tier updates: HDFCBANK→SECONDARY, TATASTEEL→WATCHLIST),
+  `data/backtesting/results_60d.json` (60-day extended results), `.env.example` (Telegram placeholders),
+  `docs/project_status.md` (this entry), `tests/test_s3_analytics.py` (26 new tests).
+- **Feature added:**
+  - Signal quality analytics: per-trade time_to_sl, time_to_t1, best/worst PnL from 5m candles, outcome_quality classification.
+  - Premarket checklist validator: 5 checks (trading day, VIX<25, data health, fresh layers, signal consistency). BLOCK vs WARN distinction.
+  - Telegram formatter: GO/NO_TRADE/DATA_DEGRADED formatted messages saved to pending_alerts JSON (no bot connected yet).
+  - Orchestrator wiring: signal_quality, checklist, and alerts auto-run after morning pipeline (all non-blocking try/except).
+  - Dashboard: signal quality expandable rows per journal trade; GIFT Nifty source label with proxy color coding; FII NET shows prev-day date label when using cache.
+  - 60-day backtest: 50.2% vs 30-day 45.4%. HDFCBANK and TATASTEEL tier updated (both timeframes agreed). 7 symbols with disagreement unchanged.
+  - Memory loop: confirmed working; logs correctly from test file; no post_market data yet (fresh system).
+  - Telegram: formatter built, sending pending 10 clean paper trades completion.
+- **Tests/checks:** 356 passed, 2 skipped. 26 new tests covering signal_quality, premarket_checklist (all-pass + 7 block/warn cases), telegram_formatter (format + save + build), memory loop (load/miss/skip-future/most-recent).
+- **Remaining limitations:** 2 paper trades collected (need 10 closed for tier accuracy stats). FII/DII cache empty until 3:30 PM post-market run. Telegram bot not yet connected. TATAMOTORS delisted from yfinance.
+- **Next step:** Accumulate 10 graded paper trades. Then: Phase 5 live intraday wiring.

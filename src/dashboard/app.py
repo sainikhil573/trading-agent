@@ -454,6 +454,24 @@ def make_accuracy_bar(valid_log: list[dict]) -> go.Figure:
 with st.sidebar:
     st.markdown(
         f'<div style="font-family:monospace;font-size:13px;font-weight:700;'
+        f'color:#8bc34a;letter-spacing:1px;margin-bottom:8px">TODAY\'S ACTION CHECKLIST</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption("Manual pre-trade checklist — session only, not saved.")
+    _chk1 = st.checkbox("Morning brief reviewed",        key="chk_brief")
+    _chk2 = st.checkbox("VIX < 25 confirmed",            key="chk_vix")
+    _chk3 = st.checkbox("Global cues checked (SGX/Dow)", key="chk_global")
+    _chk4 = st.checkbox("Entry trigger levels noted",     key="chk_entry")
+    _chk5 = st.checkbox("Paper trade logged if taken",    key="chk_logged")
+    _chk_all = all([_chk1, _chk2, _chk3, _chk4, _chk5])
+    if _chk_all:
+        st.success("All checks done — ready to trade.")
+    elif any([_chk1, _chk2, _chk3, _chk4, _chk5]):
+        st.warning("Complete checklist before entering a trade.")
+
+    st.markdown("---")
+    st.markdown(
+        f'<div style="font-family:monospace;font-size:13px;font-weight:700;'
         f'color:#8bc34a;letter-spacing:1px;margin-bottom:8px">INTRADAY OUTCOME CHECK</div>',
         unsafe_allow_html=True,
     )
@@ -512,6 +530,107 @@ with st.sidebar:
                     st.info("No paper trades found for today.")
             else:
                 st.info("No journal file found.")
+
+    st.markdown("---")
+
+    # ── TASK 2: Manual paper trade entry ──────────────────────────────────────
+    st.markdown(
+        '<div style="font-family:monospace;font-size:13px;font-weight:700;'
+        'color:#8bc34a;letter-spacing:1px;margin-bottom:8px">LOG PAPER TRADE</div>',
+        unsafe_allow_html=True,
+    )
+    _fo_universe_path = ROOT / "data" / "instruments" / "fo_universe.json"
+    _fo_syms: list[str] = []
+    if _fo_universe_path.exists():
+        _fo_data = json.loads(_fo_universe_path.read_text(encoding="utf-8"))
+        for _item in _fo_data.get("stocks", []) + _fo_data.get("indices", []):
+            if _item.get("backtest_tier") in ("PRIMARY_CANDIDATE", "SECONDARY_CANDIDATE"):
+                _fo_syms.append(_item["symbol"])
+
+    with st.form("manual_trade_form", clear_on_submit=True):
+        _mt_sym     = st.selectbox("Symbol",       options=_fo_syms or ["NIFTY"], key="mt_sym")
+        _mt_sig     = st.selectbox("Signal",        options=["CALL", "PUT"],       key="mt_sig")
+        _mt_strike  = st.number_input("Strike",     min_value=0.0, step=50.0,      key="mt_strike")
+        _mt_expiry  = st.date_input("Expiry",                                      key="mt_expiry")
+        _mt_premium = st.number_input("Entry premium (₹)", min_value=0.01, step=0.5, key="mt_prem")
+        _mt_notes   = st.text_input("Notes (optional)",                            key="mt_notes")
+        _mt_submit  = st.form_submit_button("Log trade")
+
+    if _mt_submit and _fo_syms:
+        _new_trade = {
+            "date":                  TODAY_STR,
+            "symbol":                _mt_sym,
+            "signal":                _mt_sig,
+            "strike":                float(_mt_strike) if _mt_strike else None,
+            "expiry":                str(_mt_expiry),
+            "confidence":            None,
+            "gate_effective_confidence": None,
+            "confidence_tier":       "MANUAL",
+            "entry_price":           float(_mt_premium),
+            "stop_loss":             None,
+            "target_1":              None,
+            "target_2":              None,
+            "status":                "OPEN",
+            "outcome":               None,
+            "was_correct":           None,
+            "hypothetical":          False,
+            "paper_only":            True,
+            "manually_entered":      True,
+            "notes":                 _mt_notes,
+        }
+        try:
+            _jdata = json.loads(_JOURNAL_PATH.read_text(encoding="utf-8")) if _JOURNAL_PATH.exists() else {"trades": []}
+            _jdata.setdefault("trades", []).append(_new_trade)
+            _JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _JOURNAL_PATH.write_text(json.dumps(_jdata, indent=2), encoding="utf-8")
+            st.success(f"Logged: {_mt_sym} {_mt_sig} @ ₹{_mt_premium}")
+        except Exception as _je:
+            st.error(f"Could not save: {_je}")
+
+    st.markdown("---")
+
+    # ── TASK 3: Close open paper trades ───────────────────────────────────────
+    _open_trades = []
+    if _JOURNAL_PATH.exists():
+        _jclose = json.loads(_JOURNAL_PATH.read_text(encoding="utf-8"))
+        _open_trades = [t for t in _jclose.get("trades", []) if t.get("status") == "OPEN"]
+
+    if _open_trades:
+        st.markdown(
+            '<div style="font-family:monospace;font-size:13px;font-weight:700;'
+            'color:#8bc34a;letter-spacing:1px;margin-bottom:8px">CLOSE A TRADE</div>',
+            unsafe_allow_html=True,
+        )
+        _close_labels = [f"{t['symbol']} {t['signal']} ({t['date']})" for t in _open_trades]
+        _close_idx    = st.selectbox("Select trade to close", range(len(_close_labels)),
+                                     format_func=lambda i: _close_labels[i], key="close_sel")
+        with st.form("close_trade_form", clear_on_submit=True):
+            _exit_price  = st.number_input("Exit premium (₹)", min_value=0.01, step=0.5, key="exit_prem")
+            _exit_reason = st.selectbox("Exit reason",
+                                        ["SL_HIT", "T1_HIT", "T2_HIT", "MANUAL_EXIT", "EXPIRED"],
+                                        key="exit_reason")
+            _close_submit = st.form_submit_button("Close trade")
+
+        if _close_submit:
+            try:
+                _jclose2  = json.loads(_JOURNAL_PATH.read_text(encoding="utf-8"))
+                _all      = _jclose2.get("trades", [])
+                _open_idx = [i for i, t in enumerate(_all) if t.get("status") == "OPEN"]
+                _ti       = _open_idx[_close_idx]
+                _entry    = _all[_ti].get("entry_price") or 0.0
+                _pnl      = round(float(_exit_price) - float(_entry), 2)
+                _all[_ti].update({
+                    "status":      "CLOSED",
+                    "exit_price":  float(_exit_price),
+                    "exit_reason": _exit_reason,
+                    "pnl":         _pnl,
+                    "outcome":     "WIN" if _pnl > 0 else "LOSS",
+                    "was_correct": _pnl > 0,
+                })
+                _JOURNAL_PATH.write_text(json.dumps(_jclose2, indent=2), encoding="utf-8")
+                st.success(f"Closed: P&L = ₹{_pnl:+.2f} ({_exit_reason})")
+            except Exception as _ce:
+                st.error(f"Could not close trade: {_ce}")
 
     st.markdown("---")
     st.caption("Paper trades only — no live execution")
@@ -700,11 +819,16 @@ _fii_unavailable = (
     _fii_dii_raw.get("fii_net_buy") == 0.0
     and _fii_dii_raw.get("dii_net_buy") == 0.0
 )
+_fii_prev_day    = _fii_dii_raw.get("is_prev_day", False)
+_fii_fallback_dt = _fii_dii_raw.get("fallback_date", "")
 mc[6].metric("FII NET (Cr)",
              "Unavailable" if _fii_unavailable else (
                  f"₹{fii_net:+,.0f}" if isinstance(fii_net, (int,float)) else "—"
              ),
-             delta="pre-market zero" if _fii_unavailable else None,
+             delta=(
+                 "pre-market zero" if _fii_unavailable else
+                 (f"prev-day: {_fii_fallback_dt}" if _fii_prev_day else None)
+             ),
              delta_color="off")
 
 st.markdown("---")
@@ -770,6 +894,7 @@ if _health:
     _h_color = {
         "HEALTHY":  C["success"],
         "CACHED":   C["amber"],
+        "PARTIAL":  C["amber"],
         "DEGRADED": C["amber"],
         "CRITICAL": C["red"],
     }.get(_hovrl, C["neutral"])
@@ -1134,6 +1259,31 @@ if cue_list:
         gcols[i].markdown(
             _cue_card(lbl, d.get("last", 0), d.get("pct_change") or 0,
                       invert=lbl in INVERT_LABELS),
+            unsafe_allow_html=True,
+        )
+
+    # Opening gap / GIFT Nifty source line
+    _og = cues.get("opening_gap", {})
+    if _og and _og.get("value") is not None:
+        _src_map = {
+            "gift_nifty":  "GIFT Nifty (NSE API)",
+            "nsei_proxy":  "^NSEI proxy (yfinance — GIFT unavailable)",
+            "sp500_proxy": "ES=F proxy (S&P 500 Futures — regional markets closed)",
+        }
+        _og_src   = _og.get("source", "unknown")
+        _og_label = _src_map.get(_og_src, _og_src)
+        _og_val   = _og.get("value", 0)
+        _og_pct   = _og.get("pct_change", 0) or 0
+        _og_color = C["success"] if _og_pct >= 0 else C["red"]
+        _og_arrow = "+" if _og_pct >= 0 else ""
+        _og_src_color = C["success"] if _og_src == "gift_nifty" else C["amber"]
+        st.markdown(
+            f'<div style="background:{C["card"]};border-left:3px solid {_og_src_color};'
+            f'padding:6px 12px;font-family:monospace;font-size:12px;color:{C["text2"]};margin:4px 0">'
+            f'<span style="color:{_og_src_color};font-weight:700">[OPENING GAP] </span>'
+            f'Nifty indicative: <span style="color:#fff;font-weight:700">{_og_val:,.1f}</span> '
+            f'<span style="color:{_og_color}">({_og_arrow}{_og_pct:.2f}%)</span>  '
+            f'<span style="color:{C["neutral"]}">Source: {_og_label}</span></div>',
             unsafe_allow_html=True,
         )
 
@@ -1729,6 +1879,26 @@ if _journal_path.exists():
             if _completed else "—"
         )
 
+        # TASK 4: Paper trade validation milestone progress bar
+        _graded_count = len(_completed)
+        _bar_pct      = min(_graded_count / 10, 1.0)
+        _bar_color    = C["success"] if _graded_count >= 8 else (C["amber"] if _graded_count >= 5 else C["red"])
+        _bar_label    = ("Telegram alerts ACTIVE" if _graded_count >= 10 else
+                         f"Telegram alerts activate at 10 graded trades")
+        _bar_fill_w   = int(_bar_pct * 100)
+        st.markdown(
+            f'<div style="margin:8px 0 4px 0;font-family:monospace;font-size:12px;color:{C["text2"]}">'
+            f'Paper trade validation: <b style="color:{_bar_color}">{_graded_count} / 10 trades graded</b>'
+            f'</div>'
+            f'<div style="background:{C["card"]};border:1px solid {C["border"]};border-radius:4px;'
+            f'height:12px;width:100%;margin-bottom:4px">'
+            f'  <div style="background:{_bar_color};width:{_bar_fill_w}%;height:100%;border-radius:4px"></div>'
+            f'</div>'
+            f'<div style="font-family:monospace;font-size:11px;color:{C["text2"]};margin-bottom:8px">'
+            f'{_bar_label}</div>',
+            unsafe_allow_html=True,
+        )
+
         _stats_html = (
             f'<div style="background:{C["card"]};border:1px solid {C["border"]};'
             f'padding:10px 14px;font-family:monospace;font-size:13px;'
@@ -1740,16 +1910,55 @@ if _journal_path.exists():
             f'T1 hit%: <b>{_t1_pct}</b>  |  '
             f'Avg conf: <b>{_avg_conf if _avg_conf is not None else "—"}</b>'
             f'<br>Tiers: {_tier_str}'
+            f'</div>'
         )
-        if len(_completed) < 10:
-            _needed = 10 - len(_completed)
-            _stats_html += (
-                f'<br><span style="color:{C["amber"]}">'
-                f'collecting data — {len(_completed)} of 10 trades needed '
-                f'({_needed} more to go)</span>'
-            )
-        _stats_html += "</div>"
         st.markdown(_stats_html, unsafe_allow_html=True)
+
+        # Signal quality expandable row detail
+        _sq_path = ROOT / "data" / "analytics" / "signal_quality.json"
+        _sq_map  = {}
+        if _sq_path.exists():
+            try:
+                _sq_data = json.loads(_sq_path.read_text(encoding="utf-8"))
+                for _sq in _sq_data.get("trades", []):
+                    _sq_key = f"{_sq.get('date','')}-{_sq.get('symbol','')}"
+                    _sq_map[_sq_key] = _sq
+            except Exception:
+                pass
+
+        if _sq_map:
+            st.markdown(
+                f'<div style="font-size:11px;color:{C["text2"]};font-family:monospace;'
+                f'letter-spacing:1px;margin:8px 0 4px 0">SIGNAL QUALITY DETAILS</div>',
+                unsafe_allow_html=True,
+            )
+            for _jt in _jtrades:
+                _sq_key = f"{_jt.get('date','')}-{_jt.get('symbol','')}"
+                _sq = _sq_map.get(_sq_key)
+                if not _sq:
+                    continue
+                _sq_oq    = _sq.get("outcome_quality", "—")
+                _sq_color = {
+                    "CLEAN_WIN":      C["success"],
+                    "PENDING":        C["amber"],
+                    "STOPPED_OUT":    C["red"],
+                    "SCRATCHED":      C["neutral"],
+                    "OUTCOME_UNKNOWN": C["neutral"],
+                }.get(_sq_oq, C["neutral"])
+                _sq_label = f"{_jt.get('symbol','')} {_jt.get('signal','')} [{_jt.get('date','')}]"
+                with st.expander(_sq_label):
+                    _sq_cols = st.columns(4)
+                    _sq_cols[0].metric("Outcome Quality", _sq_oq)
+                    _sq_cols[1].metric("Best PnL",
+                        f"+{_sq['best_case_pnl']:.2f}" if _sq.get("best_case_pnl") is not None else "—")
+                    _sq_cols[2].metric("Worst PnL",
+                        f"{_sq['worst_case_pnl']:.2f}" if _sq.get("worst_case_pnl") is not None else "—")
+                    _sq_cols[3].metric("Intraday", "Yes" if _sq.get("intraday_available") else "No")
+                    if _sq.get("time_to_sl") is not None:
+                        st.caption(f"SL hit at: {_sq['time_to_sl']} min from open")
+                    if _sq.get("time_to_t1") is not None:
+                        st.caption(f"T1 hit at: {_sq['time_to_t1']} min from open")
+
     else:
         st.markdown(
             f'<div style="background:{C["card"]};border:1px solid {C["border"]};'

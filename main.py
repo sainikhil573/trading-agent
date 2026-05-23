@@ -27,6 +27,13 @@ from datetime import datetime, date
 import pytz
 from dotenv import load_dotenv
 
+# Force UTF-8 stdout/stderr so Unicode chars (arrows, em-dashes) don't crash
+# on Windows with cp1252 default encoding.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -186,6 +193,17 @@ def run_scheduled() -> None:
 
 
 if __name__ == "__main__":
+    # Auto mode: stdin is a pipe (e.g. scheduled task or echo 1 | python main.py)
+    if not sys.stdin.isatty():
+        print("Auto mode detected - running morning analysis")
+        from src.orchestrator import run_morning_analysis
+        try:
+            run_morning_analysis(_get_api_key())
+            sys.exit(0)
+        except Exception:
+            logger.exception("Morning analysis failed in auto mode")
+            sys.exit(1)
+
     parser = argparse.ArgumentParser(description="Indian Stock Market AI Agent")
     parser.add_argument("--schedule",   action="store_true",
                         help="Run continuously: 08:00 morning, 09:00 pre-open, 15:30 post-market IST")

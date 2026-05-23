@@ -1,0 +1,39 @@
+{
+  "date": "2026-05-23",
+  "time": "20:35 IST",
+  "sources": {
+    "vix": {
+      "status": "FRESH",
+      "value": 17.91
+    },
+    "fii_dii": {
+      "status": "FAILED",
+      "fallback_date": null,
+      "fii_net": 0.0
+    },
+    "participant_oi": {
+      "status": "FAILED",
+      "fallback_source": null,
+      "bias": "UNKNOWN"
+    },
+    "option_chain": {
+      "status": "FRESH",
+      "nifty_spot": 23719.3,
+      "pcr": 1.023
+    },
+    "global_cues": {
+      "status": "FRESH",
+      "bias": "BULLISH"
+    },
+    "technicals": {
+      "status": "FRESH",
+      "stocks_ok": 19,
+      "stocks_total": 20
+    },
+    "news": {
+      "status": "FRESH",
+      "count": 8
+    }
+  },
+  "overall": "HEALTHY"
+}

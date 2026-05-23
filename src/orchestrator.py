@@ -185,6 +185,33 @@ def run_morning_analysis(api_key: str) -> dict:
     # S2B — append allowed trades to paper journal
     _append_to_paper_journal(brief, today)
 
+    # S3 — signal quality analytics (non-blocking)
+    try:
+        from src.analytics.signal_quality import run_signal_quality
+        run_signal_quality()
+    except Exception as _sq_exc:
+        logger.warning("Signal quality skipped: %s", _sq_exc)
+
+    # S3 — premarket checklist (attach to brief before saving)
+    try:
+        from src.validators.premarket_checklist import apply_checklist_to_brief
+        health_path = Path("data/health") / f"health_{today}.json"
+        _health_data = json.loads(health_path.read_text(encoding="utf-8")) if health_path.exists() else None
+        brief = apply_checklist_to_brief(brief, health=_health_data)
+    except Exception as _cl_exc:
+        logger.warning("Premarket checklist skipped: %s", _cl_exc)
+
+    # S3 — Telegram formatter (non-blocking)
+    try:
+        from src.alerts.telegram_formatter import build_alerts_from_brief, save_pending_alerts
+        vix_val = (brief.get("_meta", {}) or {}).get("vix_at_8am")
+        _health_path2 = Path("data/health") / f"health_{today}.json"
+        _health_for_alert = json.loads(_health_path2.read_text(encoding="utf-8")) if _health_path2.exists() else None
+        _alerts = build_alerts_from_brief(brief, health=_health_for_alert, vix=vix_val, date_str=today)
+        save_pending_alerts(_alerts, date_str=today)
+    except Exception as _tg_exc:
+        logger.warning("Telegram formatter skipped: %s", _tg_exc)
+
     # FIX 6 — update root project_status.md with today's run stats
     _update_project_status(brief, today)
 
@@ -239,10 +266,19 @@ def _save_health_report(
                           "count": len(news.get("headlines", []))},
     }
 
-    statuses  = [s["status"] for s in sources.values()]
-    n_failed  = statuses.count("FAILED")
-    overall   = "HEALTHY" if n_failed == 0 and "CACHED" not in statuses else (
-                "CRITICAL" if n_failed >= 3 else ("DEGRADED" if n_failed > 0 else "CACHED"))
+    statuses    = [s["status"] for s in sources.values()]
+    n_failed    = statuses.count("FAILED")
+    n_available = len(statuses) - n_failed
+    if n_available >= 5 and "CACHED" not in statuses:
+        overall = "HEALTHY"
+    elif n_available >= 5:
+        overall = "CACHED"
+    elif n_available in (3, 4):
+        overall = "PARTIAL"
+    elif n_available in (1, 2):
+        overall = "DEGRADED"
+    else:
+        overall = "CRITICAL"
 
     report = {"date": today, "time": _ist_now_str(), "sources": sources, "overall": overall}
     health_dir = Path("data/health")

@@ -1,0 +1,19 @@
+{
+  "date": "2026-05-23",
+  "alerts": [
+    {
+      "type": "NO_TRADE",
+      "formatted": "[NO TRADE] 2026-05-23\nReason: 2 stock trade(s) actionable: WIPRO, HINDALCO | 2 index trade(s) blocked: BANKNIFTY, NIFTY",
+      "payload": {
+        "reason": "2 stock trade(s) actionable: WIPRO, HINDALCO | 2 index trade(s) blocked: BANKNIFTY, NIFTY"
+      }
+    },
+    {
+      "type": "NO_TRADE",
+      "formatted": "[NO TRADE] 2026-05-23\nReason: 2 stock trade(s) actionable: WIPRO, HINDALCO | 2 index trade(s) blocked: BANKNIFTY, NIFTY",
+      "payload": {
+        "reason": "2 stock trade(s) actionable: WIPRO, HINDALCO | 2 index trade(s) blocked: BANKNIFTY, NIFTY"
+      }
+    }
+  ]
+}

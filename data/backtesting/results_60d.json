@@ -11582,5 +11582,164 @@
         }
       ]
     }
-  ]
+  ],
+  "comparison_30d_60d": [
+    {
+      "symbol": "ADANIENT",
+      "acc_30d": 56.2,
+      "acc_60d": 56.8,
+      "tier_30d": "PRIMARY_CANDIDATE",
+      "tier_60d": "PRIMARY_CANDIDATE",
+      "agree": true
+    },
+    {
+      "symbol": "AXISBANK",
+      "acc_30d": 0.0,
+      "acc_60d": 51.9,
+      "tier_30d": "WATCHLIST_REVIEW",
+      "tier_60d": "SECONDARY_CANDIDATE",
+      "agree": false
+    },
+    {
+      "symbol": "BAJFINANCE",
+      "acc_30d": 50.0,
+      "acc_60d": 47.8,
+      "tier_30d": "SECONDARY_CANDIDATE",
+      "tier_60d": "WATCHLIST_REVIEW",
+      "agree": false
+    },
+    {
+      "symbol": "BPCL",
+      "acc_30d": 40.0,
+      "acc_60d": 45.5,
+      "tier_30d": "WATCHLIST_REVIEW",
+      "tier_60d": "WATCHLIST_REVIEW",
+      "agree": true
+    },
+    {
+      "symbol": "DRREDDY",
+      "acc_30d": 27.3,
+      "acc_60d": 45.0,
+      "tier_30d": "WATCHLIST_REVIEW",
+      "tier_60d": "WATCHLIST_REVIEW",
+      "agree": true
+    },
+    {
+      "symbol": "HDFCBANK",
+      "acc_30d": 50.0,
+      "acc_60d": 51.4,
+      "tier_30d": "SECONDARY_CANDIDATE",
+      "tier_60d": "SECONDARY_CANDIDATE",
+      "agree": true
+    },
+    {
+      "symbol": "HINDALCO",
+      "acc_30d": 61.1,
+      "acc_60d": 60.0,
+      "tier_30d": "PRIMARY_CANDIDATE",
+      "tier_60d": "PRIMARY_CANDIDATE",
+      "agree": true
+    },
+    {
+      "symbol": "ICICIBANK",
+      "acc_30d": 28.6,
+      "acc_60d": 45.5,
+      "tier_30d": "WATCHLIST_REVIEW",
+      "tier_60d": "WATCHLIST_REVIEW",
+      "agree": true
+    },
+    {
+      "symbol": "INFY",
+      "acc_30d": 37.5,
+      "acc_60d": 46.9,
+      "tier_30d": "WATCHLIST_REVIEW",
+      "tier_60d": "WATCHLIST_REVIEW",
+      "agree": true
+    },
+    {
+      "symbol": "KOTAKBANK",
+      "acc_30d": 78.6,
+      "acc_60d": 34.8,
+      "tier_30d": "PRIMARY_CANDIDATE",
+      "tier_60d": "WATCHLIST_REVIEW",
+      "agree": false
+    },
+    {
+      "symbol": "LT",
+      "acc_30d": 25.0,
+      "acc_60d": 42.1,
+      "tier_30d": "WATCHLIST_REVIEW",
+      "tier_60d": "WATCHLIST_REVIEW",
+      "agree": true
+    },
+    {
+      "symbol": "MARUTI",
+      "acc_30d": 55.6,
+      "acc_60d": 52.0,
+      "tier_30d": "PRIMARY_CANDIDATE",
+      "tier_60d": "SECONDARY_CANDIDATE",
+      "agree": false
+    },
+    {
+      "symbol": "ONGC",
+      "acc_30d": 35.7,
+      "acc_60d": 46.7,
+      "tier_30d": "WATCHLIST_REVIEW",
+      "tier_60d": "WATCHLIST_REVIEW",
+      "agree": true
+    },
+    {
+      "symbol": "RELIANCE",
+      "acc_30d": 25.0,
+      "acc_60d": 46.2,
+      "tier_30d": "WATCHLIST_REVIEW",
+      "tier_60d": "WATCHLIST_REVIEW",
+      "agree": true
+    },
+    {
+      "symbol": "SBIN",
+      "acc_30d": 38.5,
+      "acc_60d": 57.1,
+      "tier_30d": "WATCHLIST_REVIEW",
+      "tier_60d": "PRIMARY_CANDIDATE",
+      "agree": false
+    },
+    {
+      "symbol": "SUNPHARMA",
+      "acc_30d": 33.3,
+      "acc_60d": 46.2,
+      "tier_30d": "WATCHLIST_REVIEW",
+      "tier_60d": "WATCHLIST_REVIEW",
+      "agree": true
+    },
+    {
+      "symbol": "TATASTEEL",
+      "acc_30d": 46.7,
+      "acc_60d": 47.6,
+      "tier_30d": "WATCHLIST_REVIEW",
+      "tier_60d": "WATCHLIST_REVIEW",
+      "agree": true
+    },
+    {
+      "symbol": "TCS",
+      "acc_30d": 50.0,
+      "acc_60d": 63.6,
+      "tier_30d": "SECONDARY_CANDIDATE",
+      "tier_60d": "PRIMARY_CANDIDATE",
+      "agree": false
+    },
+    {
+      "symbol": "WIPRO",
+      "acc_30d": 50.0,
+      "acc_60d": 56.5,
+      "tier_30d": "SECONDARY_CANDIDATE",
+      "tier_60d": "PRIMARY_CANDIDATE",
+      "agree": false
+    }
+  ],
+  "thresholds": {
+    "PRIMARY": ">=55",
+    "SECONDARY": ">=48",
+    "WATCHLIST": "<48"
+  }
 }
