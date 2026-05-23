@@ -14,7 +14,7 @@ dashboard display, and post-market accuracy tracking using Claude API.
 
 ## Current Stage
 
-**Phase: S3 Live Paper Collection (branch: feature/s3-validation-and-next-steps, 2026-05-22)**
+**Phase: S4 Paper Collection UX + Stability (branch: feature/s4-paper-collection-and-polish, 2026-05-22)**
 
 S2 validation dashboard: COMPLETE (330 tests → 356 tests after S3).
 
@@ -40,13 +40,25 @@ S2 validation dashboard: COMPLETE (330 tests → 356 tests after S3).
 - Current count: 2 (WIPRO CALL [OPEN], HINDALCO CALL [OPEN])
 - Next milestone: 10 graded trades (need 8 more closed + graded)
 
-### New S3 Features
+### S3 Features (complete)
 - Signal quality analytics: `src/analytics/signal_quality.py` — time_to_sl, time_to_t1, best/worst PnL, outcome_quality
 - Premarket checklist: `src/validators/premarket_checklist.py` — VIX/health/trading-day/layer-freshness gates
 - Telegram formatter: `src/alerts/telegram_formatter.py` — GO/NO_TRADE/DATA_DEGRADED formatted (not sent yet)
 - Dashboard: signal quality expandable rows, GIFT Nifty source label, FII prev-day date label
 - Telegram: formatter built, sending pending 10 clean paper trades
 - Pending alerts: `data/alerts/pending_alerts_YYYY-MM-DD.json`
+
+### S4 Features (current)
+- Windows Task Scheduler integration: `setup_task_scheduler.bat` (creates task at 22:30 EST Mon-Fri), `trading-agent-auto.bat` (silent auto run → logs to logs/auto_run_YYYY-MM-DD.log), `check_scheduler.bat` (status checker). Auto-mode in `main.py`: `not sys.stdin.isatty()` → skip menu, run morning analysis, exit 0/1.
+- FIX 1: Windows UTF-8 console encoding — `sys.stdout.reconfigure(encoding='utf-8', errors='replace')` in `main.py`
+- FIX 2: Health scoring thresholds — HEALTHY(≥5 fresh), CACHED(≥5 w/ CACHED), PARTIAL(3-4), DEGRADED(1-2), CRITICAL(0)
+  Pre-market FII/DII absence (2 sources) no longer triggers DEGRADED (was too aggressive)
+- TASK 1: Morning action checklist in sidebar (5 session-only checkboxes; green all-done / amber partial)
+- TASK 2: Manual paper trade entry form in sidebar (symbol from PRIMARY/SECONDARY universe, CALL/PUT, strike, expiry, premium, notes)
+- TASK 3: Close trade button in sidebar (select OPEN trade → exit price + reason → auto-computes P&L, writes CLOSED to journal)
+- TASK 4: 10-trade milestone progress bar in paper trade journal section (red/amber/green; label shows Telegram unlock milestone)
+- TASK 5: Backtest v2 (`src/backtesting/backtest_runner_v2.py`) — conservative RSI bounds (CALL: RSI 50-70, PUT: RSI 30-50), vol_ratio≥0.4, no EMA50 required. Saves `results_60d_v2.json`.
+- TASK 6: Windows .bat launchers — `trading-agent.bat` (scheduled), `trading-agent-manual.bat` (interactive menu)
 
 ---
 
@@ -540,6 +552,26 @@ src/dashboard/app.py      — Streamlit UI: morning brief, pre-open, post-market
   live `_fetch()` calls not yet implemented.
 - **Next step:** Phase 5 — implement live `_fetch()` in AngelOne/Kite providers using
   resolved tokens + SmartConnect / KiteConnect API calls.
+
+---
+
+### 2026-05-22 | S4 — Paper collection UX and stability | `feature/s4-paper-collection-and-polish`
+
+- **Branch:** `feature/s4-paper-collection-and-polish`
+- **Files changed:** `main.py` (UTF-8 stdout fix), `src/orchestrator.py` (health scoring thresholds),
+  `src/dashboard/app.py` (action checklist, manual trade form, close trade form, progress bar, PARTIAL color),
+  `src/backtesting/backtest_runner_v2.py` (new), `trading-agent.bat` (new), `trading-agent-manual.bat` (new),
+  `docs/project_status.md` (this entry), `tests/test_s4_paper_ux.py` (new).
+- **Feature added:**
+  - FIX 1: `sys.stdout.reconfigure(encoding='utf-8', errors='replace')` prevents cp1252 crash on Windows when Claude output contains → or — characters.
+  - FIX 2: Health scoring now uses n_available (7 − n_failed): ≥5→HEALTHY/CACHED, 3-4→PARTIAL, 1-2→DEGRADED, 0→CRITICAL. Pre-market FII/DII absence (2 out of 7 sources) yields HEALTHY/CACHED instead of DEGRADED.
+  - Dashboard sidebar: morning action checklist (5 manual checkboxes, session-only); manual paper trade form (symbol from PRIMARY/SECONDARY, CALL/PUT, strike, expiry, premium, notes → appends to journal); close trade form (select OPEN trade, enter exit price + reason → computes P&L, writes CLOSED).
+  - Dashboard: 10-trade milestone progress bar with red/amber/green color banding and "Telegram activates at 10" label.
+  - Backtest v2: conservative RSI bounds (CALL RSI 50-70, PUT RSI 30-50), vol_ratio≥0.4, EMA50 alignment removed. Diagnostic only — live signal logic unchanged.
+  - Windows launchers: `trading-agent.bat` runs scheduler; `trading-agent-manual.bat` shows 5-option menu.
+- **Tests/checks:** tests/test_s4_paper_ux.py covers health thresholds, manual trade append, close trade P&L, backtest v2 signal rules, .bat file existence.
+- **Remaining limitations:** 2 paper trades (need 10 closed for tier accuracy). No Telegram bot yet. Live broker `_fetch()` not wired.
+- **Next step:** Accumulate 10 graded paper trades. Then connect Telegram bot.
 
 ---
 

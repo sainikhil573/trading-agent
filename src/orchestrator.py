@@ -266,10 +266,19 @@ def _save_health_report(
                           "count": len(news.get("headlines", []))},
     }
 
-    statuses  = [s["status"] for s in sources.values()]
-    n_failed  = statuses.count("FAILED")
-    overall   = "HEALTHY" if n_failed == 0 and "CACHED" not in statuses else (
-                "CRITICAL" if n_failed >= 3 else ("DEGRADED" if n_failed > 0 else "CACHED"))
+    statuses    = [s["status"] for s in sources.values()]
+    n_failed    = statuses.count("FAILED")
+    n_available = len(statuses) - n_failed
+    if n_available >= 5 and "CACHED" not in statuses:
+        overall = "HEALTHY"
+    elif n_available >= 5:
+        overall = "CACHED"
+    elif n_available in (3, 4):
+        overall = "PARTIAL"
+    elif n_available in (1, 2):
+        overall = "DEGRADED"
+    else:
+        overall = "CRITICAL"
 
     report = {"date": today, "time": _ist_now_str(), "sources": sources, "overall": overall}
     health_dir = Path("data/health")

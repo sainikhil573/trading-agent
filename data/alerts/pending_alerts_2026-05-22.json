@@ -1,0 +1,20 @@
+{
+  "date": "2026-05-22",
+  "alerts": [
+    {
+      "type": "GO_SIGNAL",
+      "formatted": "[GO] WIPRO CALL",
+      "payload": {}
+    },
+    {
+      "type": "GO_SIGNAL",
+      "formatted": "[GO] WIPRO CALL",
+      "payload": {}
+    },
+    {
+      "type": "GO_SIGNAL",
+      "formatted": "[GO] WIPRO CALL",
+      "payload": {}
+    }
+  ]
+}
